@@ -1,0 +1,9 @@
+schema_version = "1.0.0"
+id = "gen_texture"
+version = "0.1.0"
+name = "GenTexture"
+tagline = "Generate textures for 3D meshes using AI image generation APIs"
+maintainer = "GenTexture"
+type = "add-on"
+blender_version_min = "4.2.0"
+license = ["SPDX:Apache-2.0"]
