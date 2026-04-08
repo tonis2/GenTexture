@@ -86,7 +86,16 @@ class StabilityProvider(Provider):
     supports_img2img = True
 
     def generate(self, request: GenerateRequest, api_key: str) -> GenerateResult:
-        if request.depth_image is not None:
+        if request.normal_image is not None:
+            # Normal maps work with the structure endpoint (generic structural guidance)
+            request_copy = GenerateRequest(
+                prompt=request.prompt, negative_prompt=request.negative_prompt,
+                width=request.width, height=request.height,
+                depth_image=request.normal_image,  # Reuse depth path for structure API
+                strength=request.strength, seed=request.seed,
+            )
+            return self._generate_structure(request_copy, api_key)
+        elif request.depth_image is not None:
             return self._generate_structure(request, api_key)
         elif request.init_image is not None:
             return self._generate_img2img(request, api_key)

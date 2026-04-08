@@ -17,17 +17,18 @@ if "bpy" in locals():
     from . import providers
     from .providers import stability, fal
     from . import operators
-    from .operators import generate, project
+    from .operators import generate, project, generate_uv
     from . import ui
     from .ui import panels
     from . import gpu
-    from .gpu import depth, bake
+    from .gpu import depth, bake, uv_normals
 
     importlib.reload(image)
     importlib.reload(threading)
     importlib.reload(utils)
     importlib.reload(depth)
     importlib.reload(bake)
+    importlib.reload(uv_normals)
     importlib.reload(gpu)
     importlib.reload(providers)    # reload base first (resets PROVIDERS dict)
     importlib.reload(stability)    # then providers re-register into it
@@ -35,6 +36,7 @@ if "bpy" in locals():
     importlib.reload(preferences)
     importlib.reload(generate)
     importlib.reload(project)
+    importlib.reload(generate_uv)
     importlib.reload(operators)
     importlib.reload(panels)
     importlib.reload(ui)
@@ -44,6 +46,7 @@ import bpy
 from .preferences import GenTexPreferences
 from .operators.generate import GENTEX_OT_Generate, GENTEX_OT_Cancel
 from .operators.project import GENTEX_OT_Project
+from .operators.generate_uv import GENTEX_OT_GenerateUV
 from .ui.panels import GENTEX_PT_generate, GENTEX_PT_project
 
 # Ensure providers are registered
@@ -56,6 +59,7 @@ classes = (
     GENTEX_OT_Generate,
     GENTEX_OT_Cancel,
     GENTEX_OT_Project,
+    GENTEX_OT_GenerateUV,
     GENTEX_PT_generate,
     GENTEX_PT_project,
 )

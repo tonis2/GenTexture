@@ -145,7 +145,9 @@ class FalProvider(Provider):
     supports_img2img = True
 
     def generate(self, request: GenerateRequest, api_key: str) -> GenerateResult:
-        if request.depth_image is not None:
+        if request.normal_image is not None:
+            return self._generate_normal(request, api_key)
+        elif request.depth_image is not None:
             return self._generate_depth(request, api_key)
         elif request.init_image is not None:
             return self._generate_img2img(request, api_key)
@@ -193,6 +195,24 @@ class FalProvider(Provider):
             body["seed"] = request.seed
         if request.init_image is not None:
             body["image_url"] = _to_data_uri(request.init_image)
+        return self._run_worker("fal-ai/flux-general", body, api_key)
+
+    def _generate_normal(self, request: GenerateRequest, api_key: str) -> GenerateResult:
+        """Normal-map-conditioned generation using flux-general with easycontrols."""
+        body = {
+            "prompt": request.prompt,
+            "easycontrols": [{
+                "control_method_url": "depth",
+                "image_url": _to_data_uri(request.normal_image),
+                "image_control_type": "spatial",
+                "scale": request.strength,
+            }],
+            "num_images": 1,
+            "output_format": "png",
+            "image_size": {"width": request.width, "height": request.height},
+        }
+        if request.seed is not None:
+            body["seed"] = request.seed
         return self._run_worker("fal-ai/flux-general", body, api_key)
 
     def _run_worker(self, model: str, body: dict, api_key: str) -> GenerateResult:

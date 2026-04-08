@@ -101,21 +101,27 @@ class GENTEX_PT_project(bpy.types.Panel):
 
         layout.separator()
 
-        # Projection settings
-        layout.prop(scene, "gentex_depth_size")
-        layout.prop(scene, "gentex_project_input")
-        if scene.gentex_project_input == 'COLOR':
-            layout.prop(scene, "gentex_strength")
+        # Mode-specific settings
+        in_edit = context.object is not None and context.object.mode == 'EDIT'
+        if in_edit:
+            # Projection settings (edit mode only)
+            layout.prop(scene, "gentex_depth_size")
+            layout.prop(scene, "gentex_project_input")
+            if scene.gentex_project_input == 'COLOR':
+                layout.prop(scene, "gentex_strength")
 
-        layout.prop(scene, "gentex_project_bake")
-        if scene.gentex_project_bake:
-            for obj in context.selected_objects:
-                if hasattr(obj, "data") and hasattr(obj.data, "uv_layers") and len(obj.data.uv_layers) > 0:
-                    layout.prop_search(
-                        obj.data.uv_layers, "active",
-                        obj.data, "uv_layers",
-                        text=f"{obj.name} Target UVs"
-                    )
+            layout.prop(scene, "gentex_project_bake")
+            if scene.gentex_project_bake:
+                for obj in context.selected_objects:
+                    if hasattr(obj, "data") and hasattr(obj.data, "uv_layers") and len(obj.data.uv_layers) > 0:
+                        layout.prop_search(
+                            obj.data.uv_layers, "active",
+                            obj.data, "uv_layers",
+                            text=f"{obj.name} Target UVs"
+                        )
+        else:
+            # UV-space settings (object mode)
+            layout.prop(scene, "gentex_strength")
 
         layout.separator()
 
@@ -129,7 +135,10 @@ class GENTEX_PT_project(bpy.types.Panel):
             box.label(text=scene.gentex_info, icon='ERROR')
             row = layout.row()
             row.scale_y = 1.5
-            row.operator("gentex.project", icon='MOD_UVPROJECT')
+            if in_edit:
+                row.operator("gentex.project", icon='MOD_UVPROJECT')
+            else:
+                row.operator("gentex.generate_uv", icon='UV')
         else:
             # Validation
             api_key = prefs.get_api_key(prefs.provider) if prefs.provider else ""
@@ -137,10 +146,18 @@ class GENTEX_PT_project(bpy.types.Panel):
                 box = layout.box()
                 box.label(text="No API key configured", icon='ERROR')
                 box.operator("preferences.addon_show", text="Open Preferences").module = ADDON_PKG
-            elif context.object is None or context.object.mode != 'EDIT':
-                box = layout.box()
-                box.label(text="Enter Edit Mode and select faces", icon='INFO')
-            else:
+            elif in_edit:
                 row = layout.row()
                 row.scale_y = 1.5
                 row.operator("gentex.project", icon='MOD_UVPROJECT')
+            elif context.object is not None and context.object.type == 'MESH':
+                if context.object.data.uv_layers:
+                    row = layout.row()
+                    row.scale_y = 1.5
+                    row.operator("gentex.generate_uv", icon='UV')
+                else:
+                    box = layout.box()
+                    box.label(text="Mesh needs a UV map", icon='INFO')
+            else:
+                box = layout.box()
+                box.label(text="Select a mesh object", icon='INFO')
