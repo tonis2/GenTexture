@@ -258,6 +258,95 @@ class FalFluxProvider(_FalBase):
 # Nano Banana (Gemini 2.5 Flash Image)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# FLUX General — inpaint + IP-Adapter (style references) + ControlNet
+# ---------------------------------------------------------------------------
+
+# Default IP-Adapter checkpoints used when `reference_images` are supplied.
+# These ship with fal's flux-general endpoint and don't require extra config.
+_FLUX_IP_ADAPTER_PATH = "XLabs-AI/flux-ip-adapter"
+_FLUX_IP_ADAPTER_ENCODER = "openai/clip-vit-large-patch14"
+
+
+@register_provider
+class FalFluxGeneralProvider(_FalBase):
+    """fal's `flux-general` endpoint — the multi-modal FLUX pipeline.
+
+    The single endpoint accepts: init image, mask, ControlNet conditioning
+    (depth/normal), and a list of IP-Adapter references for style. This is the
+    one provider that gives you both the inpaint pixel-preservation contract
+    (so screen-space projection lines up) AND multi-image style references.
+    """
+
+    id = "fal_flux_general"
+    label = "fal · FLUX General (Inpaint + IP-Adapter)"
+
+    @classmethod
+    def capabilities(cls) -> set[str]:
+        return {
+            CAP_TEXT2IMG, CAP_IMG2IMG, CAP_INPAINT,
+            CAP_REFERENCE_IMAGES, CAP_DEPTH, CAP_NORMAL,
+        }
+
+    def generate(self, request: GenerateRequest) -> GenerateResult:
+        # All capabilities map to the same endpoint — it's the fields on the
+        # body that change. Override `generate()` instead of routing through
+        # text2img/img2img/inpaint because the dispatch in api.py would split
+        # apart cases (e.g. inpaint + references) that this endpoint handles
+        # in a single call.
+        body = {
+            "prompt": request.prompt,
+            "num_images": 1,
+            "output_format": "png",
+            "image_size": {"width": request.width, "height": request.height},
+        }
+        if request.seed is not None:
+            body["seed"] = request.seed
+        if request.negative_prompt:
+            body["negative_prompt"] = request.negative_prompt
+
+        if request.init_image is not None:
+            body["image_url"] = _to_data_uri(request.init_image)
+            body["strength"] = request.strength
+        if request.mask_image is not None:
+            body["mask_url"] = _to_data_uri(request.mask_image)
+
+        easycontrols = []
+        if request.depth_image is not None:
+            easycontrols.append({
+                "control_method_url": "depth",
+                "image_url": _to_data_uri(request.depth_image),
+                "image_control_type": "spatial",
+                "scale": request.strength,
+            })
+        if request.normal_image is not None:
+            easycontrols.append({
+                "control_method_url": "normal",
+                "image_url": _to_data_uri(request.normal_image),
+                "image_control_type": "spatial",
+                "scale": request.strength,
+            })
+        if easycontrols:
+            body["easycontrols"] = easycontrols
+
+        if request.reference_images:
+            # Spread weight evenly across references; capped at 1.0 total so
+            # the prompt still drives the result instead of being overridden.
+            per_ref = min(1.0, 1.0 / len(request.reference_images))
+            body["ip_adapters"] = [{
+                "ip_adapter_path": _FLUX_IP_ADAPTER_PATH,
+                "image_encoder_path": _FLUX_IP_ADAPTER_ENCODER,
+                "ip_adapter_image_url": _to_data_uri(ref),
+                "scale": per_ref,
+            } for ref in request.reference_images]
+
+        return self._run("fal-ai/flux-general", body)
+
+
+# ---------------------------------------------------------------------------
+# Nano Banana (Gemini 2.5 Flash Image)
+# ---------------------------------------------------------------------------
+
 @register_provider
 class FalNanoBananaProvider(_FalBase):
     id = "fal_nano_banana"

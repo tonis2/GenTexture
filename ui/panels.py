@@ -164,6 +164,18 @@ class GENTEX_PT_project(bpy.types.Panel):
         if not _has_api_key(prefs):
             return
 
+        # Projection relies on the AI returning pixels in the same positions
+        # as the input — i.e. the inpaint contract (outside-mask pixels come
+        # back identical, inside-mask pixels are repainted). Providers without
+        # this capability will look misaligned even when the generation looks
+        # great in isolation.
+        if prefs.provider:
+            from ..providers import PROVIDERS, CAP_INPAINT
+            pcls = PROVIDERS.get(prefs.provider)
+            if pcls and CAP_INPAINT not in pcls.capabilities():
+                box = layout.box()
+                box.label(text="Provider lacks inpaint", icon='ERROR')
+
         layout.separator()
         if not _draw_status(layout, scene):
             _draw_action(layout, "gentex.project_layer", icon='IMAGE_RGB_ALPHA')

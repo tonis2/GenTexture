@@ -161,11 +161,17 @@ class GENTEX_OT_ProjectLayer(bpy.types.Operator):
             return {'CANCELLED'}
 
         region_w, region_h = region.width, region.height
+        target_w = scene.gentex_width
+        target_h = scene.gentex_height
 
         scene.gentex_info = "Capturing viewport..."
         scene.gentex_progress = 1
 
-        # 1. Visible image (the textured mesh as user sees it)
+        # Render the viewport and selection mask at the viewport's native size
+        # — that's what the viewport projection matrix is set up for. Then
+        # bilinearly resize to the AI's target dimensions. Rendering directly
+        # at target size would mismatch the projection matrix's aspect ratio
+        # and squish the mask relative to the visible image.
         try:
             visible = render_visible_image(area, region_w, region_h)
         except Exception as e:
@@ -173,7 +179,6 @@ class GENTEX_OT_ProjectLayer(bpy.types.Operator):
             scene.gentex_info = f"Error: {e}"
             return {'CANCELLED'}
 
-        # 2. Selection mask through same camera
         edit_objs = [o for o in context.objects_in_mode
                      if o.type == 'MESH' and o.data.is_editmode]
         mask = render_selection_mask(
@@ -191,8 +196,10 @@ class GENTEX_OT_ProjectLayer(bpy.types.Operator):
             self.report({'ERROR'}, "Selection produced an empty mask.")
             return {'CANCELLED'}
 
-        # 3. Snapshot screen-space UVs into a new UV layer per object,
-        #    and assign those faces to the layer-stack material now (in edit mode)
+        # Snapshot screen-space UVs into a new UV layer per object, and assign
+        # those faces to the layer-stack material now (in edit mode). UVs are
+        # captured against the live viewport region, not the AI render size —
+        # they're normalised so the AI image dimensions don't matter.
         scene.gentex_info = "Snapshotting UVs..."
         per_obj_uv = []  # (obj, uv_name, selected_face_indices)
         for obj in edit_objs:
@@ -210,14 +217,9 @@ class GENTEX_OT_ProjectLayer(bpy.types.Operator):
             self.report({'ERROR'}, "No selected faces.")
             return {'CANCELLED'}
 
-        # 4. Build provider request
         scene.gentex_info = "Generating..."
-
-        # Resize visible/mask to provider target dimensions
-        target_w = scene.gentex_width
-        target_h = scene.gentex_height
-        visible_resized = _nn_resize(visible, target_w, target_h)
-        mask_resized = _nn_resize(mask, target_w, target_h)
+        visible_resized = _bilinear_resize(visible, target_w, target_h)
+        mask_resized = _bilinear_resize(mask, target_w, target_h)
 
         # Gather reference images (any Image data-block, including layer images
         # picked from the panel). Each is encoded once here on the main thread.
@@ -288,7 +290,7 @@ class GENTEX_OT_ProjectLayer(bpy.types.Operator):
                 mask_rgba = np.stack([mask_arr] * 3 + [np.ones_like(mask_arr)], axis=-1)
                 mask_img = np_to_bpy(mask_rgba, base_name + " Mask")
 
-                for obj, uv_name, _face_indices in captured_per_obj:
+                for obj, uv_name, face_indices in captured_per_obj:
                     layer = obj.gentex_layers.add()
                     layer.name = base_name
                     layer.image = color_img
@@ -297,6 +299,9 @@ class GENTEX_OT_ProjectLayer(bpy.types.Operator):
                     layer.opacity = 1.0
                     layer.visible = True
                     layer.seed = result.seed
+                    # Store which faces this layer covers so later cleanup can
+                    # restore them when the layer is removed.
+                    layer["face_indices"] = list(face_indices)
                     obj.gentex_active_layer_index = len(obj.gentex_layers) - 1
                     rebuild_layer_stack(obj)
 
@@ -322,14 +327,44 @@ class GENTEX_OT_ProjectLayer(bpy.types.Operator):
         return {'FINISHED'}
 
 
-def _nn_resize(arr: np.ndarray, w: int, h: int) -> np.ndarray:
-    """Nearest-neighbour resize. Avoids pulling in a heavy dep just for this."""
+def _bilinear_resize(arr: np.ndarray, w: int, h: int) -> np.ndarray:
+    """Bilinear resize for (H, W) or (H, W, C) float arrays.
+
+    Avoids the row-repetition / stair-step artifacts of nearest-neighbour when
+    upscaling, and the aliasing of NN downscaling. Pure numpy — no extra deps.
+    """
     src_h = arr.shape[0]
     src_w = arr.shape[1]
     if src_w == w and src_h == h:
         return arr
-    row_idx = (np.linspace(0, src_h - 1, h)).astype(int)
-    col_idx = (np.linspace(0, src_w - 1, w)).astype(int)
-    if arr.ndim == 2:
-        return arr[np.ix_(row_idx, col_idx)]
-    return arr[np.ix_(row_idx, col_idx)]
+
+    y_idx = np.linspace(0, src_h - 1, h, dtype=np.float32)
+    x_idx = np.linspace(0, src_w - 1, w, dtype=np.float32)
+    y0 = np.floor(y_idx).astype(np.int32)
+    x0 = np.floor(x_idx).astype(np.int32)
+    y1 = np.minimum(y0 + 1, src_h - 1)
+    x1 = np.minimum(x0 + 1, src_w - 1)
+    fy = y_idx - y0
+    fx = x_idx - x0
+
+    a = arr[y0[:, None], x0[None, :]]
+    b = arr[y0[:, None], x1[None, :]]
+    c = arr[y1[:, None], x0[None, :]]
+    d = arr[y1[:, None], x1[None, :]]
+
+    if arr.ndim == 3:
+        fy_b = fy[:, None, None]
+        fx_b = fx[None, :, None]
+    else:
+        fy_b = fy[:, None]
+        fx_b = fx[None, :]
+
+    top = a + (b - a) * fx_b
+    bot = c + (d - c) * fx_b
+    return (top + (bot - top) * fy_b).astype(np.float32)
+
+
+# Back-compat alias: existing callers expected nearest-neighbour, but bilinear
+# is strictly better for the smooth signals we resize here (visible image,
+# AI output, mask).
+_nn_resize = _bilinear_resize
