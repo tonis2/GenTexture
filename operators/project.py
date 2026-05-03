@@ -134,7 +134,7 @@ class GENTEX_OT_Project(bpy.types.Operator):
         # --- Step 2: Reuse or create material, set up projected UVs ---
         scene.gentex_info = "Setting up UVs and material..."
 
-        use_bake = scene.gentex_project_bake
+        use_bake = True
         target_objects = []
 
         for obj in context.objects_in_mode:

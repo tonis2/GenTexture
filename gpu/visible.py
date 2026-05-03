@@ -36,6 +36,15 @@ def render_visible_image(area, region_width: int, region_height: int) -> np.ndar
             hidden_spaces.append(sp)
             sp.overlay.show_overlays = False
 
+    # Edit Mode bakes the mesh wireframe straight into `render.opengl` output
+    # regardless of the overlay toggle — FLUX then preserves that wire pattern
+    # outside the mask, polluting every subsequent UV sample. Drop to Object
+    # Mode for the render so the mesh comes back clean.
+    obj = bpy.context.active_object
+    was_edit = obj is not None and obj.mode == 'EDIT'
+    if was_edit:
+        bpy.ops.object.mode_set(mode='OBJECT')
+
     out_path = tempfile.NamedTemporaryFile(suffix='.png', delete=False).name
     scene.render.image_settings.file_format = 'PNG'
     scene.render.filepath = out_path
@@ -47,6 +56,8 @@ def render_visible_image(area, region_width: int, region_height: int) -> np.ndar
         finally:
             bpy.data.images.remove(img)
     finally:
+        if was_edit:
+            bpy.ops.object.mode_set(mode='EDIT')
         for sp in hidden_spaces:
             sp.overlay.show_overlays = True
         scene.render.resolution_x = res_x

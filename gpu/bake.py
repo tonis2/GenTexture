@@ -93,11 +93,25 @@ def _rasterize_tri(out: np.ndarray, src_img: np.ndarray,
     u_src = l1 * s[0, 0] + l2 * s[1, 0] + l3 * s[2, 0]
     v_src = l1 * s[0, 1] + l2 * s[1, 1] + l3 * s[2, 1]
 
-    # Sample source (bottom-up storage)
-    sx = np.clip((u_src * sw).astype(np.int32), 0, sw - 1)
-    sy = np.clip((v_src * sh).astype(np.int32), 0, sh - 1)
-
-    sampled = src_img[sy, sx]
+    # Bilinear sample source (bottom-up storage). Nearest-neighbour produced
+    # visible blockiness wherever the dest face was larger than the src face's
+    # screen-space footprint (i.e. faces near the silhouette of the projection
+    # camera, where one screen pixel maps to several dest pixels).
+    sx_f = np.clip(u_src * sw - 0.5, 0, sw - 1)
+    sy_f = np.clip(v_src * sh - 0.5, 0, sh - 1)
+    x0i = np.floor(sx_f).astype(np.int32)
+    y0i = np.floor(sy_f).astype(np.int32)
+    x1i = np.minimum(x0i + 1, sw - 1)
+    y1i = np.minimum(y0i + 1, sh - 1)
+    fx = (sx_f - x0i)[..., None]
+    fy = (sy_f - y0i)[..., None]
+    a = src_img[y0i, x0i]
+    b = src_img[y0i, x1i]
+    c = src_img[y1i, x0i]
+    d = src_img[y1i, x1i]
+    top = a + (b - a) * fx
+    bot = c + (d - c) * fx
+    sampled = top + (bot - top) * fy
 
     region = out[y0:y1, x0:x1]
     region[inside] = sampled[inside]

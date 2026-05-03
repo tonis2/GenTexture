@@ -266,6 +266,11 @@ class GENTEX_OT_ProjectLayer(bpy.types.Operator):
         def on_complete(result):
             global _active_task
             _active_task = None
+            # Always clear the spinner first — if anything below throws, the UI
+            # mustn't be left stuck on "IN_PROGRESS (Ns)" from the polling
+            # timer. We re-write info to "Error: ..." in the except block.
+            scene.gentex_progress = 0
+            scene.gentex_info = ""
             try:
                 ai_image = load_image_bytes(result.image_bytes)
                 # Match viewport orientation
@@ -298,21 +303,42 @@ class GENTEX_OT_ProjectLayer(bpy.types.Operator):
                     layer.uv_name = uv_name
                     layer.opacity = 1.0
                     layer.visible = True
-                    layer.seed = result.seed
+                    # Some providers (e.g. fal flux-general) return 64-bit
+                    # seeds that overflow Blender's 32-bit IntProperty. Clamp
+                    # to the int32 range — the full value still lives in the
+                    # generated image's name for reference.
+                    layer.seed = int(result.seed) & 0x7fffffff
                     # Store which faces this layer covers so later cleanup can
                     # restore them when the layer is removed.
                     layer["face_indices"] = list(face_indices)
                     obj.gentex_active_layer_index = len(obj.gentex_layers) - 1
                     rebuild_layer_stack(obj)
 
-                scene.gentex_info = ""
-                scene.gentex_progress = 0
+                # Always transfer the screen-space-projected layer into the
+                # object's real UV layout. Screen projection only looks correct
+                # from the shooting camera angle; baking unmoors the texture
+                # from the camera so it sticks to the geometry. Per-object so
+                # multi-object Edit Mode still works. Bake errors are swallowed
+                # (logged) — the projected layer is still useful even if the
+                # bake fails, so don't take down the whole completion path.
+                for obj, _, _ in captured_per_obj:
+                    if obj.data.uv_layers.active is None:
+                        continue
+                    prev_active = bpy.context.view_layer.objects.active
+                    bpy.context.view_layer.objects.active = obj
+                    try:
+                        bpy.ops.gentex.bake_layers()
+                        obj.gentex_use_baked = True
+                    except Exception as bake_err:
+                        print(f"[GenTex] auto-bake failed: {bake_err}")
+                    finally:
+                        bpy.context.view_layer.objects.active = prev_active
+
                 for window in bpy.context.window_manager.windows:
                     for a in window.screen.areas:
                         if a.type == 'VIEW_3D':
                             a.tag_redraw()
             except Exception as e:
-                scene.gentex_progress = 0
                 scene.gentex_info = f"Error: {e}"
                 import traceback
                 traceback.print_exc()

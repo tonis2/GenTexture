@@ -43,15 +43,13 @@ class GENTEX_OT_BakeLayers(bpy.types.Operator):
             self.report({'ERROR'}, "Active UV layer required.")
             return {'CANCELLED'}
 
-        was_edit = obj.mode == 'EDIT'
-        if was_edit:
-            bpy.ops.object.mode_set(mode='OBJECT')
-
-        try:
-            result = self._bake(obj, target_uv.name, self.width, self.height)
-        finally:
-            if was_edit:
-                bpy.ops.object.mode_set(mode='EDIT')
+        # Don't switch modes — calling `bpy.ops.object.mode_set` from inside
+        # an operator's execute (especially when this operator is itself
+        # invoked from another operator's callback like project_layer's
+        # on_complete) is unreliable: the switch can be deferred or crash
+        # Blender. Instead, read UVs directly from the live edit-mesh bmesh
+        # when in Edit Mode, and from the mesh data otherwise.
+        result = self._bake(obj, target_uv.name, self.width, self.height)
 
         if result is None:
             self.report({'ERROR'}, "Baking failed.")
@@ -99,27 +97,37 @@ class GENTEX_OT_BakeLayers(bpy.types.Operator):
 
     def _bake_one(self, obj, image, src_uv_name, dest_uv_name, w, h):
         """Bake a single image from src_uv -> dest_uv, returns (h, w, 4)."""
-        bm = bmesh.new()
-        bm.from_mesh(obj.data)
-        bmesh.ops.triangulate(bm, faces=bm.faces[:])
+        # In Edit Mode, the live bmesh holds the truth — `obj.data.uv_layers`
+        # is stale until the user exits edit mode. Iterate the editing bmesh
+        # directly. `bake_to_uv` does its own per-face fan-triangulation, so
+        # the mesh doesn't need a destructive triangulate pass.
+        owned = False
+        if obj.mode == 'EDIT':
+            bm = bmesh.from_edit_mesh(obj.data)
+        else:
+            bm = bmesh.new()
+            bm.from_mesh(obj.data)
+            owned = True
 
-        src_layer = bm.loops.layers.uv.get(src_uv_name)
-        dest_layer = bm.loops.layers.uv.get(dest_uv_name)
-        if src_layer is None or dest_layer is None:
-            bm.free()
-            return None
+        try:
+            src_layer = bm.loops.layers.uv.get(src_uv_name)
+            dest_layer = bm.loops.layers.uv.get(dest_uv_name)
+            if src_layer is None or dest_layer is None:
+                return None
 
-        src_w, src_h = image.size[0], image.size[1]
-        src_pixels = np.empty(src_w * src_h * 4, dtype=np.float32)
-        image.pixels.foreach_get(src_pixels)
+            src_w, src_h = image.size[0], image.size[1]
+            src_pixels = np.empty(src_w * src_h * 4, dtype=np.float32)
+            image.pixels.foreach_get(src_pixels)
 
-        flat = bake_to_uv(
-            src_pixels, src_w, src_h,
-            bm, src_layer, dest_layer,
-            w, h,
-        )
-        bm.free()
-        return np.flipud(flat.reshape(h, w, 4))
+            flat = bake_to_uv(
+                src_pixels, src_w, src_h,
+                bm, src_layer, dest_layer,
+                w, h,
+            )
+            return np.flipud(flat.reshape(h, w, 4))
+        finally:
+            if owned:
+                bm.free()
 
 
 BAKED_MAT_MARKER = "gentex_baked_material"
@@ -141,14 +149,27 @@ def _get_or_create_baked_material(obj, image, uv_name):
     nt = mat.node_tree
     nt.nodes.clear()
     out = nt.nodes.new("ShaderNodeOutputMaterial")
-    out.location = (600, 0)
+    out.location = (900, 0)
     bsdf = nt.nodes.new("ShaderNodeBsdfPrincipled")
-    bsdf.location = (300, 0)
+    bsdf.location = (600, 0)
     nt.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
     tex = nt.nodes.new("ShaderNodeTexImage")
     tex.location = (0, 0)
     tex.image = image
-    nt.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
+    # A single projection only covers a fraction of the UV layout; everywhere
+    # the bake didn't reach has alpha=0. Without this mix, those regions would
+    # render pure black. Fall back to neutral grey so unbaked faces look like
+    # plain unpainted material instead of "broken texture".
+    fallback = nt.nodes.new("ShaderNodeRGB")
+    fallback.location = (0, -250)
+    fallback.outputs[0].default_value = (0.5, 0.5, 0.5, 1.0)
+    mix = nt.nodes.new("ShaderNodeMixRGB")
+    mix.location = (300, 0)
+    mix.blend_type = 'MIX'
+    nt.links.new(tex.outputs["Alpha"], mix.inputs["Fac"])
+    nt.links.new(fallback.outputs[0], mix.inputs[1])
+    nt.links.new(tex.outputs["Color"], mix.inputs[2])
+    nt.links.new(mix.outputs[0], bsdf.inputs["Base Color"])
     if uv_name:
         uv = nt.nodes.new("ShaderNodeUVMap")
         uv.location = (-300, 0)
@@ -177,12 +198,23 @@ def _find_layer_stack_material(obj):
     return None
 
 
-def apply_baked_toggle(obj, enabled: bool):
-    """Switch the mesh between layer-stack shading and the single baked image.
+SNAPSHOT_PER_FACE_KEY = "gentex_baked_face_orig_idx"
 
-    On enable: snapshot the face indices currently assigned to the layer-stack
-    material and reassign them to the baked material. On disable: restore those
-    same faces back to the layer-stack material.
+
+def apply_baked_toggle(obj, enabled: bool):
+    """Switch the mesh between its native shading and the single baked image.
+
+    On enable: snapshot every face's current `material_index` and reassign
+    every face to the baked material. The baked material's alpha-driven mix
+    falls back to neutral grey on unbaked UV regions, so faces that never had
+    a real material to begin with no longer show as Blender's pink "missing
+    material" default.
+
+    On disable: restore each face to its snapshotted slot.
+
+    Mode-aware: in Edit Mode it goes through bmesh + `bmesh.update_edit_mesh`,
+    otherwise direct writes to mesh polygons are silently overwritten by the
+    bmesh sync.
 
     No-ops when there's no baked image (toggle UI shouldn't appear in that case).
     """
@@ -192,8 +224,7 @@ def apply_baked_toggle(obj, enabled: bool):
     if baked is None:
         return
 
-    polys = obj.data.polygons
-    layer_mat = _find_layer_stack_material(obj)
+    in_edit = obj.mode == 'EDIT'
 
     if enabled:
         uv_name = obj.gentex_baked_uv
@@ -202,28 +233,53 @@ def apply_baked_toggle(obj, enabled: bool):
         baked_mat = _get_or_create_baked_material(obj, baked, uv_name)
         baked_idx = _ensure_slot(obj, baked_mat)
 
-        if layer_mat is not None:
-            layer_idx = _ensure_slot(obj, layer_mat)
-            moved = [i for i, p in enumerate(polys) if p.material_index == layer_idx]
+        if in_edit:
+            import bmesh
+            bm = bmesh.from_edit_mesh(obj.data)
+            bm.faces.ensure_lookup_table()
+            orig = [f.material_index for f in bm.faces]
+            for f in bm.faces:
+                f.material_index = baked_idx
+            bmesh.update_edit_mesh(obj.data)
         else:
-            moved = list(range(len(polys)))
+            polys = obj.data.polygons
+            orig = [p.material_index for p in polys]
+            for p in polys:
+                p.material_index = baked_idx
 
-        for i in moved:
-            polys[i].material_index = baked_idx
-        obj[SNAPSHOT_KEY] = moved
+        obj[SNAPSHOT_PER_FACE_KEY] = orig
+        # Keep the legacy key cleared so we never accidentally fall back to
+        # the old "only restore the listed faces to the layer slot" path.
+        if SNAPSHOT_KEY in obj.keys():
+            del obj[SNAPSHOT_KEY]
         obj.active_material_index = baked_idx
     else:
-        moved = obj.get(SNAPSHOT_KEY)
-        if moved is None or layer_mat is None:
-            if SNAPSHOT_KEY in obj.keys():
-                del obj[SNAPSHOT_KEY]
+        orig = obj.get(SNAPSHOT_PER_FACE_KEY)
+        if orig is None:
+            # No snapshot — fall back to leaving faces as they are. Clean up
+            # any stale snapshot keys so we don't trip up on next enable.
+            for k in (SNAPSHOT_PER_FACE_KEY, SNAPSHOT_KEY):
+                if k in obj.keys():
+                    del obj[k]
             return
-        layer_idx = _ensure_slot(obj, layer_mat)
-        for i in moved:
-            if 0 <= i < len(polys):
-                polys[i].material_index = layer_idx
-        del obj[SNAPSHOT_KEY]
-        obj.active_material_index = layer_idx
+
+        if in_edit:
+            import bmesh
+            bm = bmesh.from_edit_mesh(obj.data)
+            bm.faces.ensure_lookup_table()
+            for f in bm.faces:
+                if f.index < len(orig):
+                    f.material_index = int(orig[f.index])
+            bmesh.update_edit_mesh(obj.data)
+        else:
+            polys = obj.data.polygons
+            for i, p in enumerate(polys):
+                if i < len(orig):
+                    p.material_index = int(orig[i])
+
+        del obj[SNAPSHOT_PER_FACE_KEY]
+        if SNAPSHOT_KEY in obj.keys():
+            del obj[SNAPSHOT_KEY]
 
     for window in bpy.context.window_manager.windows:
         for area in window.screen.areas:

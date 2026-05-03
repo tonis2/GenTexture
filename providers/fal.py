@@ -21,6 +21,7 @@ import tempfile
 
 from .api import (
     Provider, GenerateRequest, GenerateResult, PreferenceField,
+    AuthenticationError,
     register_provider,
     CAP_TEXT2IMG, CAP_IMG2IMG, CAP_INPAINT, CAP_DEPTH, CAP_NORMAL,
     CAP_REFERENCE_IMAGES,
@@ -114,8 +115,18 @@ conn.close()
 
 status("Fetching result...")
 rreq = urllib.request.Request(response_url, headers={"Authorization": f"Key {api_key}", "Accept": "application/json"})
-with urllib.request.urlopen(rreq, timeout=30) as resp:
-    result = json.loads(resp.read().decode())
+try:
+    with urllib.request.urlopen(rreq, timeout=30) as resp:
+        result = json.loads(resp.read().decode())
+except urllib.error.HTTPError as e:
+    body = ""
+    try: body = e.read().decode()[:500]
+    except Exception: pass
+    print(json.dumps({"error": f"Fetch result HTTP {e.code}: {body}"}))
+    sys.exit(0)
+except Exception as e:
+    print(json.dumps({"error": f"Fetch result failed: {e}"}))
+    sys.exit(0)
 
 images = result.get("images", [])
 if not images:
@@ -127,8 +138,12 @@ seed = result.get("seed", 0)
 
 status("Downloading...")
 ireq = urllib.request.Request(image_url)
-with urllib.request.urlopen(ireq, timeout=60) as resp:
-    img_data = resp.read()
+try:
+    with urllib.request.urlopen(ireq, timeout=60) as resp:
+        img_data = resp.read()
+except Exception as e:
+    print(json.dumps({"error": f"Image download failed: {e}"}))
+    sys.exit(0)
 
 with open(config["output_path"], "wb") as f:
     f.write(img_data)
@@ -151,13 +166,28 @@ class _FalBase(Provider):
             PreferenceField(
                 name="api_key",
                 label="API Key",
-                description="API key from fal.ai/dashboard/keys",
+                description=(
+                    "fal.ai key in 'key_id:key_secret' format from "
+                    "fal.ai/dashboard/keys"
+                ),
                 kind="password",
             ),
         ]
 
     def _run(self, model: str, body: dict, *, timeout: int = 660) -> GenerateResult:
-        api_key = self.settings.get("api_key", "")
+        # Strip whitespace defensively — pastes often include a trailing
+        # newline, which makes fal return "No user found for Key ID and Secret"
+        # because the secret half ends up containing the newline character.
+        api_key = self.settings.get("api_key", "").strip()
+        if not api_key:
+            raise AuthenticationError(
+                "No fal.ai API key configured. Set it in the addon preferences."
+            )
+        if ":" not in api_key:
+            raise AuthenticationError(
+                "fal.ai key must be in 'key_id:key_secret' format. Copy the "
+                "full key from fal.ai/dashboard/keys."
+            )
 
         try:
             with open(_STATUS_FILE, "w") as f:

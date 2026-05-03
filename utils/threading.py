@@ -59,19 +59,22 @@ def run_async(
     thread.start()
 
     def poll():
-        # Update UI with provider status if available
-        try:
-            from ..providers.fal import get_status
-            status = get_status()
-            if status:
-                bpy.context.scene.gentex_info = status
-        except Exception:
-            pass
+        # Only refresh status from the provider while the worker thread is
+        # still alive. Once it exits, on_complete / on_error own the UI state;
+        # writing here can race them and leave a stale "IN_PROGRESS (Ns)"
+        # message behind if on_complete throws before clearing info.
+        if thread.is_alive():
+            try:
+                from ..providers.fal import get_status
+                status = get_status()
+                if status:
+                    bpy.context.scene.gentex_info = status
+            except Exception:
+                pass
+            _tag_redraw()
+            return 0.5
 
         _tag_redraw()
-
-        if thread.is_alive():
-            return 0.5  # check again in 500ms
         if task.is_cancelled:
             return None
         if "error" in result_holder:

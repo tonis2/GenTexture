@@ -176,6 +176,14 @@ class GENTEX_PT_project(bpy.types.Panel):
                 box = layout.box()
                 box.label(text="Provider lacks inpaint", icon='ERROR')
 
+        obj = context.object
+        if obj and obj.data.uv_layers:
+            layout.prop_search(
+                obj.data.uv_layers, "active",
+                obj.data, "uv_layers",
+                text="Target UV",
+            )
+
         layout.separator()
         if not _draw_status(layout, scene):
             _draw_action(layout, "gentex.project_layer", icon='IMAGE_RGB_ALPHA')

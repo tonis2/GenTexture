@@ -3,6 +3,13 @@ import bpy
 from ..utils.material import rebuild_layer_stack, MARKER_KEY
 
 
+# Mirror of the constants in `.bake_layers` — duplicated rather than imported
+# so this module has no sibling-module load-order dependency. Both names are
+# the canonical spellings written by the bake operator and the use-baked toggle.
+BAKED_MAT_MARKER = "gentex_baked_material"
+SNAPSHOT_KEY = "gentex_baked_face_idx"
+
+
 def _find_layer_stack_slot(obj) -> int:
     for i, slot in enumerate(obj.material_slots):
         if slot.material and slot.material.get(MARKER_KEY):
@@ -80,6 +87,41 @@ def _reassign_faces(obj, from_slot: int, to_slot: int,
             if poly.index in exclude:
                 continue
             poly.material_index = to_slot
+
+
+def _remove_gentex_material_slots(obj):
+    """Strip the layer-stack and baked-image materials from `obj`.
+
+    Faces referencing these slots are reset to slot 0 first so material_index
+    assignments stay valid after slots are popped. The material data blocks are
+    orphaned (left to Blender's GC) — removing them outright would clobber any
+    other object still referencing the same data block.
+    """
+    markers = (MARKER_KEY, BAKED_MAT_MARKER)
+    victims = sorted(
+        (i for i, slot in enumerate(obj.material_slots)
+         if slot.material and any(slot.material.get(m) for m in markers)),
+        reverse=True,
+    )
+    if not victims:
+        return
+
+    victim_set = set(victims)
+    if obj.mode == 'EDIT':
+        import bmesh
+        bm = bmesh.from_edit_mesh(obj.data)
+        bm.faces.ensure_lookup_table()
+        for f in bm.faces:
+            if f.material_index in victim_set:
+                f.material_index = 0
+        bmesh.update_edit_mesh(obj.data)
+    else:
+        for poly in obj.data.polygons:
+            if poly.material_index in victim_set:
+                poly.material_index = 0
+
+    for i in victims:
+        obj.data.materials.pop(index=i)
 
 
 def _remove_uv_layer(obj, name: str):
@@ -170,12 +212,15 @@ class GENTEX_OT_LayerClear(bpy.types.Operator):
         for name in orphan_names:
             _remove_uv_layer(obj, name)
 
-        layer_slot = _find_layer_stack_slot(obj)
-        if layer_slot >= 0 and not obj.gentex_use_baked:
-            _reassign_faces(obj, from_slot=layer_slot, to_slot=0)
+        _remove_gentex_material_slots(obj)
 
         obj.gentex_layers.clear()
         obj.gentex_active_layer_index = -1
+        obj.gentex_baked_image = None
+        obj.gentex_baked_uv = ""
+        if obj.gentex_use_baked:
+            obj.gentex_use_baked = False
+        if SNAPSHOT_KEY in obj.keys():
+            del obj[SNAPSHOT_KEY]
 
-        rebuild_layer_stack(obj)
         return {'FINISHED'}

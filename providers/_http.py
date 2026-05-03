@@ -75,13 +75,13 @@ def run_subprocess(
     if proc.returncode != 0:
         _cleanup(out_path)
         raise ProviderError(
-            f"Worker exited with code {proc.returncode}: {proc.stderr[:500]}"
+            f"Worker exited with code {proc.returncode}: {proc.stderr[:2000]}"
         )
 
     stdout = proc.stdout.strip()
     if not stdout:
         _cleanup(out_path)
-        raise ProviderError(f"No output from worker. stderr: {proc.stderr[:500]}")
+        raise ProviderError(f"No output from worker. stderr: {proc.stderr[:2000]}")
 
     try:
         result = json.loads(stdout)

@@ -30,28 +30,50 @@ ADDON_PKG = __package__
 # Field-to-property translation
 # ---------------------------------------------------------------------------
 
+def _save_prefs_on_change(self, context):
+    """Persist user preferences immediately when a field changes.
+
+    Without this, API keys typed into the addon prefs only survive across
+    Blender restarts if the user has "Auto Save Preferences" enabled or clicks
+    Save manually. The save call is safe — it's the same operation Blender
+    runs on quit when auto-save is on.
+    """
+    try:
+        bpy.ops.wm.save_userpref()
+    except Exception:
+        # Save can transiently fail (e.g. file lock). The next change retries.
+        pass
+
+
 def _to_bpy_prop(field: PreferenceField):
     name = field.label
     desc = field.description
+    upd = _save_prefs_on_change
     if field.kind == "string":
         return bpy.props.StringProperty(name=name, description=desc,
-                                         default=str(field.default or ""))
+                                         default=str(field.default or ""),
+                                         update=upd)
     if field.kind == "password":
         return bpy.props.StringProperty(name=name, description=desc,
-                                         default="", subtype='PASSWORD')
+                                         default="", subtype='PASSWORD',
+                                         update=upd)
     if field.kind == "enum":
         return bpy.props.EnumProperty(name=name, description=desc,
                                        items=field.items or [],
-                                       default=field.default)
+                                       default=field.default,
+                                       update=upd)
     if field.kind == "int":
         return bpy.props.IntProperty(name=name, description=desc,
-                                      default=int(field.default or 0))
+                                      default=int(field.default or 0),
+                                      update=upd)
     if field.kind == "float":
         return bpy.props.FloatProperty(name=name, description=desc,
-                                        default=float(field.default or 0.0))
+                                        default=float(field.default or 0.0),
+                                        update=upd)
     if field.kind == "bool":
         return bpy.props.BoolProperty(name=name, description=desc,
-                                       default=bool(field.default))
+                                       default=bool(field.default),
+                                       update=upd)
     raise ValueError(f"Unknown preference field kind: {field.kind}")
 
 
@@ -78,6 +100,9 @@ def _draw(self, context):
         box.label(text=pcls.label or pid, icon='SETTINGS')
         for f in fields:
             box.prop(self, _attr_name(pid, f.name))
+
+    row = layout.row()
+    row.operator("wm.save_userpref", text="Save Preferences", icon='FILE_TICK')
 
 
 def _get_provider_settings(self, provider_id: str) -> dict:
@@ -109,6 +134,7 @@ def _build_preferences_class():
             name="Provider",
             description="Active image generation provider",
             items=_provider_items,
+            update=_save_prefs_on_change,
         ),
     }
 

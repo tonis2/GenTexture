@@ -142,11 +142,6 @@ def register():
         ],
         default='DEPTH',
     )
-    scene.gentex_project_bake = bpy.props.BoolProperty(
-        name="Bake to UV",
-        description="Remap the projected texture to the active UV layout",
-        default=False,
-    )
 
 
 def unregister():
@@ -161,7 +156,6 @@ def unregister():
     del scene.gentex_progress
     del scene.gentex_info
     del scene.gentex_project_input
-    del scene.gentex_project_bake
 
     properties.unregister()
 
