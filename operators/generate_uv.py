@@ -33,7 +33,8 @@ class GENTEX_OT_GenerateUV(bpy.types.Operator):
 
         prefs = context.preferences.addons[ADDON_PKG].preferences
         provider_name = prefs.provider
-        api_key = prefs.get_api_key(provider_name)
+        settings = prefs.get_provider_settings(provider_name)
+        api_key = settings.get("api_key", "")
 
         if not api_key:
             self.report({'ERROR'}, "No API key configured.")
@@ -66,14 +67,14 @@ class GENTEX_OT_GenerateUV(bpy.types.Operator):
             strength=scene.gentex_strength,
         )
 
-        provider = PROVIDERS[provider_name]()
+        provider = PROVIDERS[provider_name](settings)
 
         # Capture references for the callback
         active_obj = obj
         active_uv_name = uv_name
 
         def do_generate():
-            return provider.generate(request, api_key)
+            return provider.generate(request)
 
         def on_complete(result):
             global _active_task

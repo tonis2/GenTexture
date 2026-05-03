@@ -35,20 +35,28 @@ class GENTEX_OT_Project(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         if context.scene.gentex_progress > 0:
+            cls.poll_message_set("A generation is already running. Use Reset Status if stuck")
             return False
         if context.object is None or context.object.mode != 'EDIT':
+            cls.poll_message_set("Enter Edit Mode on a mesh")
             return False
-        # Check that at least one face is selected
-        for obj in context.selected_objects:
-            if obj.type != 'MESH' or not obj.data.is_editmode:
-                continue
+
+        edit_meshes = [o for o in context.objects_in_mode
+                       if o.type == 'MESH' and o.data.is_editmode]
+        if not edit_meshes:
+            cls.poll_message_set("No mesh currently in Edit Mode")
+            return False
+
+        for obj in edit_meshes:
             try:
                 mesh = bmesh.from_edit_mesh(obj.data)
-                for f in mesh.faces:
-                    if f.select:
-                        return True
+                if any(f.select for f in mesh.faces):
+                    return True
             except Exception:
                 continue
+        cls.poll_message_set(
+            "Select faces. Tip: switch to Face Select (press 3) and click a face"
+        )
         return False
 
     def execute(self, context):
@@ -56,7 +64,8 @@ class GENTEX_OT_Project(bpy.types.Operator):
 
         prefs = context.preferences.addons[ADDON_PKG].preferences
         provider_name = prefs.provider
-        api_key = prefs.get_api_key(provider_name)
+        settings = prefs.get_provider_settings(provider_name)
+        api_key = settings.get("api_key", "")
 
         if not api_key:
             self.report({'ERROR'}, "No API key configured.")
@@ -128,7 +137,7 @@ class GENTEX_OT_Project(bpy.types.Operator):
         use_bake = scene.gentex_project_bake
         target_objects = []
 
-        for obj in context.selected_objects:
+        for obj in context.objects_in_mode:
             if obj.type != 'MESH' or not obj.data.is_editmode:
                 continue
 
@@ -296,17 +305,17 @@ class GENTEX_OT_Project(bpy.types.Operator):
             request.init_image = np_to_png_bytes(np.flipud(init_array))
             bpy.data.images.remove(init_image)
 
-        provider = PROVIDERS[provider_name]()
+        provider = PROVIDERS[provider_name](settings)
 
         # Capture the bake target UV name now (context may be stale in callback)
         bake_target_uv_name = None
-        if use_bake and context.selected_objects:
-            active_uv = context.selected_objects[0].data.uv_layers.active
+        if use_bake and context.objects_in_mode:
+            active_uv = context.objects_in_mode[0].data.uv_layers.active
             if active_uv:
                 bake_target_uv_name = active_uv.name
 
         def do_generate():
-            return provider.generate(request, api_key)
+            return provider.generate(request)
 
         def on_complete(result):
             global _active_task

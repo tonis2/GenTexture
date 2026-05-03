@@ -13,6 +13,15 @@ class GENTEX_UL_Layers(bpy.types.UIList):
         row.prop(item, "opacity", text="", slider=True)
 
 
+class GENTEX_UL_References(bpy.types.UIList):
+    """List view for reference images fed alongside the prompt."""
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname):
+        row = layout.row(align=True)
+        # Image picker — works for any Blender image, including layer images
+        row.prop(item, "image", text="")
+
+
 class GENTEX_PT_generate(bpy.types.Panel):
     bl_label = "GenTexture"
     bl_idname = "GENTEX_PT_generate"
@@ -83,19 +92,40 @@ class GENTEX_PT_project(bpy.types.Panel):
     bl_region_type = 'UI'
     bl_category = "GenTexture"
 
+    @classmethod
+    def poll(cls, context):
+        obj = context.object
+        if obj is None or obj.type != 'MESH':
+            return False
+        if obj.mode == 'EDIT':
+            return True
+        # In Object Mode only show if there are layers to bake;
+        # otherwise hide to keep things uncluttered.
+        return bool(obj.gentex_layers)
+
     def draw(self, context):
         layout = self.layout
         layout.use_property_split = True
         layout.use_property_decorate = False
         scene = context.scene
 
-        # Provider selection
+        in_edit = context.object is not None and context.object.mode == 'EDIT'
+
+        # Object Mode is only reachable here when there are existing layers
+        # to bake (poll guard). Show a minimal view focused on baking.
+        if not in_edit:
+            box = layout.box()
+            box.label(text=f"{len(context.object.gentex_layers)} layer(s) on this mesh",
+                      icon='RENDERLAYERS')
+            box.label(text="Use the Projected Layers panel below to bake.")
+            return
+
+        # ---------- Edit Mode: full projection UI ----------
         prefs = context.preferences.addons[ADDON_PKG].preferences
         layout.prop(prefs, "provider")
 
         layout.separator()
 
-        # Prompt
         col = layout.column(align=True)
         col.label(text="Prompt:")
         col.prop(scene, "gentex_prompt", text="")
@@ -104,38 +134,63 @@ class GENTEX_PT_project(bpy.types.Panel):
 
         layout.separator()
 
-        # Size
         row = layout.row(align=True)
         row.prop(scene, "gentex_width")
         row.prop(scene, "gentex_height")
 
         layout.separator()
 
-        # Mode-specific settings
-        in_edit = context.object is not None and context.object.mode == 'EDIT'
-        if in_edit:
-            # Projection settings (edit mode only)
-            layout.prop(scene, "gentex_depth_size")
-            layout.prop(scene, "gentex_project_input")
-            if scene.gentex_project_input == 'COLOR':
-                layout.prop(scene, "gentex_strength")
-
-            layout.prop(scene, "gentex_project_bake")
-            if scene.gentex_project_bake:
-                for obj in context.selected_objects:
-                    if hasattr(obj, "data") and hasattr(obj.data, "uv_layers") and len(obj.data.uv_layers) > 0:
-                        layout.prop_search(
-                            obj.data.uv_layers, "active",
-                            obj.data, "uv_layers",
-                            text=f"{obj.name} Target UVs"
-                        )
-        else:
-            # UV-space settings (object mode)
+        layout.prop(scene, "gentex_depth_size")
+        layout.prop(scene, "gentex_project_input")
+        if scene.gentex_project_input == 'COLOR':
             layout.prop(scene, "gentex_strength")
+        layout.prop(scene, "gentex_strength")
+
+        layout.prop(scene, "gentex_project_bake")
+        if scene.gentex_project_bake:
+            for obj in context.selected_objects:
+                if hasattr(obj, "data") and hasattr(obj.data, "uv_layers") and len(obj.data.uv_layers) > 0:
+                    layout.prop_search(
+                        obj.data.uv_layers, "active",
+                        obj.data, "uv_layers",
+                        text=f"{obj.name} Target UVs"
+                    )
+
+        # ---------- Reference images ----------
+        layout.separator()
+        header = layout.row(align=True)
+        header.label(text=f"References ({len(scene.gentex_references)})", icon='IMAGE_DATA')
+
+        if scene.gentex_references:
+            layout.template_list(
+                "GENTEX_UL_References", "",
+                scene, "gentex_references",
+                scene, "gentex_active_reference_index",
+                rows=2,
+            )
+
+        row = layout.row(align=True)
+        row.operator("gentex.reference_add", text="Add Slot", icon='ADD')
+        row.operator("gentex.reference_load", text="Load File...", icon='FILEBROWSER')
+        if context.object and context.object.gentex_layers:
+            layout.operator("gentex.reference_add_from_active_layer",
+                            text="Use Active Layer", icon='RENDERLAYERS')
+        if scene.gentex_references:
+            row = layout.row(align=True)
+            row.operator("gentex.reference_remove", text="Remove", icon='X')
+            row.operator("gentex.reference_clear", text="Clear", icon='TRASH')
+
+        # Provider hint: only providers declaring CAP_REFERENCE_IMAGES use refs
+        if scene.gentex_references and prefs.provider:
+            from ..providers import PROVIDERS, CAP_REFERENCE_IMAGES
+            pcls = PROVIDERS.get(prefs.provider)
+            if pcls and CAP_REFERENCE_IMAGES not in pcls.capabilities():
+                box = layout.box()
+                box.label(text="Active provider ignores reference images", icon='INFO')
+                box.label(text="Switch to a provider with multi-image support")
 
         layout.separator()
 
-        # Actions
         if scene.gentex_progress > 0:
             box = layout.box()
             box.label(text=scene.gentex_info or "Working...", icon='SORTTIME')
@@ -145,33 +200,18 @@ class GENTEX_PT_project(bpy.types.Panel):
             box.label(text=scene.gentex_info, icon='ERROR')
             row = layout.row()
             row.scale_y = 1.5
-            if in_edit:
-                row.operator("gentex.project", icon='MOD_UVPROJECT')
-            else:
-                row.operator("gentex.generate_uv", icon='UV')
+            row.operator("gentex.project_layer", icon='IMAGE_RGB_ALPHA')
         else:
-            # Validation
             api_key = prefs.get_api_key(prefs.provider) if prefs.provider else ""
             if not api_key:
                 box = layout.box()
                 box.label(text="No API key configured", icon='ERROR')
                 box.operator("preferences.addon_show", text="Open Preferences").module = ADDON_PKG
-            elif in_edit:
+            else:
                 col = layout.column(align=True)
                 col.scale_y = 1.5
                 col.operator("gentex.project_layer", icon='IMAGE_RGB_ALPHA')
                 col.operator("gentex.project", icon='MOD_UVPROJECT')
-            elif context.object is not None and context.object.type == 'MESH':
-                if context.object.data.uv_layers:
-                    row = layout.row()
-                    row.scale_y = 1.5
-                    row.operator("gentex.generate_uv", icon='UV')
-                else:
-                    box = layout.box()
-                    box.label(text="Mesh needs a UV map", icon='INFO')
-            else:
-                box = layout.box()
-                box.label(text="Select a mesh object", icon='INFO')
 
 
 class GENTEX_PT_layers(bpy.types.Panel):
@@ -185,15 +225,12 @@ class GENTEX_PT_layers(bpy.types.Panel):
 
     @classmethod
     def poll(cls, context):
-        return context.object is not None and context.object.type == 'MESH'
+        obj = context.object
+        return obj is not None and obj.type == 'MESH' and bool(obj.gentex_layers)
 
     def draw(self, context):
         layout = self.layout
         obj = context.object
-
-        if not obj.gentex_layers:
-            layout.label(text="No layers yet. Use Project as New Layer.", icon='INFO')
-            return
 
         layout.template_list(
             "GENTEX_UL_Layers", "",

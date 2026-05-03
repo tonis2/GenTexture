@@ -25,7 +25,8 @@ class GENTEX_OT_Generate(bpy.types.Operator):
 
         prefs = context.preferences.addons[ADDON_PKG].preferences
         provider_name = prefs.provider
-        api_key = prefs.get_api_key(provider_name)
+        settings = prefs.get_provider_settings(provider_name)
+        api_key = settings.get("api_key", "")
 
         if not api_key:
             self.report({'ERROR'}, "No API key configured. Set it in addon preferences.")
@@ -56,12 +57,12 @@ class GENTEX_OT_Generate(bpy.types.Operator):
             array = bpy_to_np(init_img)
             request.init_image = np_to_png_bytes(array)
 
-        provider = PROVIDERS[provider_name]()
+        provider = PROVIDERS[provider_name](settings)
         scene.gentex_info = "Generating..."
         scene.gentex_progress = 1
 
         def do_generate():
-            return provider.generate(request, api_key)
+            return provider.generate(request)
 
         def on_complete(result):
             global _active_task

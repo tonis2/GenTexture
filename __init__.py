@@ -10,17 +10,33 @@ bl_info = {
 
 _needs_reload = "preferences" in locals()
 
+# Import order matters: providers must register (via @register_provider in
+# their module bodies) BEFORE preferences.py builds its dynamic AddonPreferences
+# class at import time.
+from . import providers as _providers_pkg
+from .providers import api as _api
+from .providers import _http as _http_helper
+from .providers import stability as _stability
+from .providers import fal as _fal
+
 from . import preferences
 from . import properties
 from .utils import image as _img, threading as _thr, material as _mat
 from .gpu import depth as _depth, bake as _bake, uv_normals as _uvn, mask as _mask, visible as _vis
-from .providers import stability as _stability, fal as _fal
 from .operators import generate as _gen, project as _proj, generate_uv as _gen_uv
 from .operators import project_layer as _pl, bake_layers as _bl, layers as _layers
+from .operators import references as _refs
 from .ui import panels as _panels
 
 if _needs_reload:
     import importlib
+    # Reload the API foundation first
+    _api = importlib.reload(_api)
+    _http_helper = importlib.reload(_http_helper)
+    _providers_pkg = importlib.reload(_providers_pkg)
+    _stability = importlib.reload(_stability)
+    _fal = importlib.reload(_fal)
+    # Then everything that depends on it
     preferences = importlib.reload(preferences)
     properties = importlib.reload(properties)
     _img = importlib.reload(_img)
@@ -31,18 +47,13 @@ if _needs_reload:
     _uvn = importlib.reload(_uvn)
     _mask = importlib.reload(_mask)
     _vis = importlib.reload(_vis)
-    # Reload providers AFTER the base providers/__init__.py (which holds the
-    # PROVIDERS dict) so re-registration uses the fresh dict.
-    from . import providers as _providers
-    _providers = importlib.reload(_providers)
-    _stability = importlib.reload(_stability)
-    _fal = importlib.reload(_fal)
     _gen = importlib.reload(_gen)
     _proj = importlib.reload(_proj)
     _gen_uv = importlib.reload(_gen_uv)
     _pl = importlib.reload(_pl)
     _bl = importlib.reload(_bl)
     _layers = importlib.reload(_layers)
+    _refs = importlib.reload(_refs)
     _panels = importlib.reload(_panels)
 
 
@@ -59,7 +70,13 @@ classes = (
     _bl.GENTEX_OT_BakeLayers,
     _layers.GENTEX_OT_LayerRemove,
     _layers.GENTEX_OT_LayerClear,
+    _refs.GENTEX_OT_ReferenceAdd,
+    _refs.GENTEX_OT_ReferenceLoad,
+    _refs.GENTEX_OT_ReferenceAddFromActiveLayer,
+    _refs.GENTEX_OT_ReferenceRemove,
+    _refs.GENTEX_OT_ReferenceClear,
     _panels.GENTEX_UL_Layers,
+    _panels.GENTEX_UL_References,
     _panels.GENTEX_PT_generate,
     _panels.GENTEX_PT_project,
     _panels.GENTEX_PT_layers,

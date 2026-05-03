@@ -1,24 +1,38 @@
+"""fal.ai providers.
+
+Two provider classes share fal's queue-based worker protocol via `_FalBase`:
+
+  * `FalFluxProvider`         - Black Forest Labs FLUX. Full caps incl. inpaint.
+  * `FalNanoBananaProvider`   - Google Gemini 2.5 Flash Image. Multi-image
+                                consistency; no native mask channel.
+
+Both endpoints follow the same async-queue pattern:
+  POST /<model>            -> { request_id, status_url, response_url }
+  GET  status_url          -> poll until status == "COMPLETED"
+  GET  response_url        -> { images: [{url}], seed }
+  GET  images[0].url       -> PNG bytes
+"""
+
+from __future__ import annotations
+
 import base64
-import json
-import subprocess
-import sys
-import tempfile
 import os
+import tempfile
 
-from . import (
-    Provider, GenerateRequest, GenerateResult,
-    ProviderError, AuthenticationError, RateLimitError,
+from .api import (
+    Provider, GenerateRequest, GenerateResult, PreferenceField,
     register_provider,
+    CAP_TEXT2IMG, CAP_IMG2IMG, CAP_INPAINT, CAP_DEPTH, CAP_NORMAL,
+    CAP_REFERENCE_IMAGES,
 )
+from ._http import run_subprocess
 
 
-# Path to a temp file where the subprocess writes status updates.
-# The UI timer reads this file to show progress.
-_status_file = os.path.join(tempfile.gettempdir(), "gentex_fal_status")
+# Path to a temp file where the subprocess writes status updates,
+# polled by the UI timer for progress display.
+_STATUS_FILE = os.path.join(tempfile.gettempdir(), "gentex_fal_status")
 
 
-# Python script executed in a subprocess to avoid GIL-blocking SSL handshakes.
-# Writes status to a file, final JSON result to stdout.
 _WORKER_SCRIPT = r'''
 import json, sys, time, urllib.request, urllib.error, http.client, ssl
 from urllib.parse import urlparse
@@ -30,30 +44,21 @@ def status(msg):
     try:
         with open(status_path, "w") as f:
             f.write(msg)
-    except:
-        pass
+    except: pass
+
 api_key = config["api_key"]
 model = config["model"]
 body = config["body"]
+headers = {"Authorization": f"Key {api_key}", "Content-Type": "application/json"}
 
-headers = {
-    "Authorization": f"Key {api_key}",
-    "Content-Type": "application/json",
-}
-
-# Step 1: Submit to queue
 status("Submitting...")
 data = json.dumps(body).encode()
-req = urllib.request.Request(
-    f"https://queue.fal.run/{model}",
-    data=data, headers=headers, method="POST",
-)
+req = urllib.request.Request(f"https://queue.fal.run/{model}", data=data, headers=headers, method="POST")
 try:
     with urllib.request.urlopen(req, timeout=60) as resp:
         qr = json.loads(resp.read().decode())
 except urllib.error.HTTPError as e:
-    err = e.read().decode()
-    print(json.dumps({"error": f"HTTP {e.code}: {err}"}))
+    print(json.dumps({"error": f"HTTP {e.code}: {e.read().decode()}"}))
     sys.exit(0)
 except Exception as e:
     print(json.dumps({"error": str(e)}))
@@ -68,7 +73,6 @@ status_url = qr.get("status_url", f"https://queue.fal.run/{model}/requests/{requ
 response_url = qr.get("response_url", f"https://queue.fal.run/{model}/requests/{request_id}")
 status("Queued...")
 
-# Step 2: Poll with persistent connection
 parsed = urlparse(status_url)
 ctx = ssl.create_default_context()
 conn = http.client.HTTPSConnection(parsed.hostname, port=parsed.port or 443, context=ctx, timeout=15)
@@ -93,7 +97,6 @@ while elapsed < max_wait:
 
     st = sd.get("status", "")
     status(f"{st} ({int(elapsed)}s)")
-
     if st == "COMPLETED":
         break
     elif st in ("FAILED", "CANCELLED"):
@@ -109,7 +112,6 @@ else:
 
 conn.close()
 
-# Step 3: Fetch result
 status("Fetching result...")
 rreq = urllib.request.Request(response_url, headers={"Authorization": f"Key {api_key}", "Accept": "application/json"})
 with urllib.request.urlopen(rreq, timeout=30) as resp:
@@ -123,89 +125,73 @@ if not images:
 image_url = images[0]["url"]
 seed = result.get("seed", 0)
 
-# Step 4: Download image
 status("Downloading...")
 ireq = urllib.request.Request(image_url)
 with urllib.request.urlopen(ireq, timeout=60) as resp:
     img_data = resp.read()
 
-out_path = config["output_path"]
-with open(out_path, "wb") as f:
+with open(config["output_path"], "wb") as f:
     f.write(img_data)
 
 status("")
-print(json.dumps({"seed": seed, "output_path": out_path, "size": len(img_data)}))
+print(json.dumps({"seed": seed, "size": len(img_data)}))
 '''
 
 
+# ---------------------------------------------------------------------------
+# Shared base
+# ---------------------------------------------------------------------------
+
+class _FalBase(Provider):
+    """Shared queue-protocol logic + API-key field."""
+
+    @classmethod
+    def preference_fields(cls) -> list[PreferenceField]:
+        return [
+            PreferenceField(
+                name="api_key",
+                label="API Key",
+                description="API key from fal.ai/dashboard/keys",
+                kind="password",
+            ),
+        ]
+
+    def _run(self, model: str, body: dict, *, timeout: int = 660) -> GenerateResult:
+        api_key = self.settings.get("api_key", "")
+
+        try:
+            with open(_STATUS_FILE, "w") as f:
+                f.write("Starting...")
+        except OSError:
+            pass
+
+        result = run_subprocess(
+            _WORKER_SCRIPT,
+            {
+                "api_key": api_key,
+                "model": model,
+                "body": body,
+                "status_path": _STATUS_FILE,
+            },
+            timeout=timeout,
+        )
+        return GenerateResult(image_bytes=result["image_bytes"], seed=result.get("seed", 0))
+
+
+# ---------------------------------------------------------------------------
+# FLUX
+# ---------------------------------------------------------------------------
+
 @register_provider
-class FalProvider(Provider):
-    name = "fal"
-    supports_depth = True
-    supports_img2img = True
-    # supports_inpaint is set per-instance based on the configured model
+class FalFluxProvider(_FalBase):
+    id = "fal_flux"
+    label = "fal · FLUX"
 
-    def __init__(self):
-        self.model = _read_fal_model_pref()
-        # Nano Banana (Gemini 2.5 Flash Image) has no mask channel; we report
-        # that we don't support inpaint so the caller falls back to client-side
-        # composite of (init_image, ai_result, mask).
-        self.supports_inpaint = (self.model == 'flux')
-        self.supports_depth = (self.model == 'flux')
+    @classmethod
+    def capabilities(cls) -> set[str]:
+        return {CAP_TEXT2IMG, CAP_IMG2IMG, CAP_INPAINT, CAP_DEPTH, CAP_NORMAL}
 
-    def generate(self, request: GenerateRequest, api_key: str) -> GenerateResult:
-        if self.model == 'nano_banana':
-            # Nano Banana uses a single edit endpoint for img2img and a
-            # text-to-image endpoint for plain prompts.
-            if request.init_image is not None:
-                return self._generate_nano_banana_edit(request, api_key)
-            return self._generate_nano_banana(request, api_key)
-
-        # FLUX path
-        if request.init_image is not None and request.mask_image is not None:
-            return self._generate_inpaint(request, api_key)
-        if request.normal_image is not None:
-            return self._generate_normal(request, api_key)
-        elif request.depth_image is not None:
-            return self._generate_depth(request, api_key)
-        elif request.init_image is not None:
-            return self._generate_img2img(request, api_key)
-        else:
-            return self._generate_text2img(request, api_key)
-
-    def _generate_inpaint(self, request: GenerateRequest, api_key: str) -> GenerateResult:
-        body = {
-            "prompt": request.prompt,
-            "image_url": _to_data_uri(request.init_image),
-            "mask_url": _to_data_uri(request.mask_image),
-            "num_images": 1,
-            "output_format": "png",
-        }
-        if request.seed is not None:
-            body["seed"] = request.seed
-        return self._run_worker("fal-ai/flux-pro/v1/fill", body, api_key)
-
-    def _generate_nano_banana(self, request: GenerateRequest, api_key: str) -> GenerateResult:
-        body = {
-            "prompt": request.prompt,
-            "num_images": 1,
-            "output_format": "png",
-        }
-        return self._run_worker("fal-ai/gemini-25-flash-image", body, api_key)
-
-    def _generate_nano_banana_edit(self, request: GenerateRequest, api_key: str) -> GenerateResult:
-        # Edit endpoint: prompt + one or more reference images, returns an edited image.
-        # We don't pass the mask: Nano Banana ignores it. project_layer's local
-        # composite handles per-pixel masking using the mask we kept on the addon side.
-        body = {
-            "prompt": request.prompt,
-            "image_urls": [_to_data_uri(request.init_image)],
-            "num_images": 1,
-            "output_format": "png",
-        }
-        return self._run_worker("fal-ai/gemini-25-flash-image/edit", body, api_key)
-
-    def _generate_text2img(self, request: GenerateRequest, api_key: str) -> GenerateResult:
+    def text2img(self, request: GenerateRequest) -> GenerateResult:
         body = {
             "prompt": request.prompt,
             "image_size": {"width": request.width, "height": request.height},
@@ -214,9 +200,9 @@ class FalProvider(Provider):
         }
         if request.seed is not None:
             body["seed"] = request.seed
-        return self._run_worker("fal-ai/flux/schnell", body, api_key)
+        return self._run("fal-ai/flux/schnell", body)
 
-    def _generate_img2img(self, request: GenerateRequest, api_key: str) -> GenerateResult:
+    def img2img(self, request: GenerateRequest) -> GenerateResult:
         body = {
             "prompt": request.prompt,
             "image_url": _to_data_uri(request.init_image),
@@ -226,15 +212,34 @@ class FalProvider(Provider):
         }
         if request.seed is not None:
             body["seed"] = request.seed
-        return self._run_worker("fal-ai/flux/dev/image-to-image", body, api_key)
+        return self._run("fal-ai/flux/dev/image-to-image", body)
 
-    def _generate_depth(self, request: GenerateRequest, api_key: str) -> GenerateResult:
-        """Depth-conditioned generation using flux-general with easycontrols."""
+    def inpaint(self, request: GenerateRequest) -> GenerateResult:
+        body = {
+            "prompt": request.prompt,
+            "image_url": _to_data_uri(request.init_image),
+            "mask_url": _to_data_uri(request.mask_image),
+            "num_images": 1,
+            "output_format": "png",
+        }
+        if request.seed is not None:
+            body["seed"] = request.seed
+        return self._run("fal-ai/flux-pro/v1/fill", body)
+
+    def depth(self, request: GenerateRequest) -> GenerateResult:
+        body = self._easycontrol_body(request, request.depth_image)
+        return self._run("fal-ai/flux-general", body)
+
+    def normal(self, request: GenerateRequest) -> GenerateResult:
+        body = self._easycontrol_body(request, request.normal_image)
+        return self._run("fal-ai/flux-general", body)
+
+    def _easycontrol_body(self, request: GenerateRequest, control_png: bytes) -> dict:
         body = {
             "prompt": request.prompt,
             "easycontrols": [{
                 "control_method_url": "depth",
-                "image_url": _to_data_uri(request.depth_image),
+                "image_url": _to_data_uri(control_png),
                 "image_control_type": "spatial",
                 "scale": request.strength,
             }],
@@ -246,104 +251,54 @@ class FalProvider(Provider):
             body["seed"] = request.seed
         if request.init_image is not None:
             body["image_url"] = _to_data_uri(request.init_image)
-        return self._run_worker("fal-ai/flux-general", body, api_key)
+        return body
 
-    def _generate_normal(self, request: GenerateRequest, api_key: str) -> GenerateResult:
-        """Normal-map-conditioned generation using flux-general with easycontrols."""
+
+# ---------------------------------------------------------------------------
+# Nano Banana (Gemini 2.5 Flash Image)
+# ---------------------------------------------------------------------------
+
+@register_provider
+class FalNanoBananaProvider(_FalBase):
+    id = "fal_nano_banana"
+    label = "fal · Nano Banana (Gemini 2.5 Flash Image)"
+
+    @classmethod
+    def capabilities(cls) -> set[str]:
+        # No CAP_INPAINT: Nano Banana has no mask channel. The addon's
+        # client-side composite handles per-pixel masking instead.
+        return {CAP_TEXT2IMG, CAP_IMG2IMG, CAP_REFERENCE_IMAGES}
+
+    def text2img(self, request: GenerateRequest) -> GenerateResult:
         body = {
             "prompt": request.prompt,
-            "easycontrols": [{
-                "control_method_url": "depth",
-                "image_url": _to_data_uri(request.normal_image),
-                "image_control_type": "spatial",
-                "scale": request.strength,
-            }],
             "num_images": 1,
             "output_format": "png",
-            "image_size": {"width": request.width, "height": request.height},
         }
-        if request.seed is not None:
-            body["seed"] = request.seed
-        return self._run_worker("fal-ai/flux-general", body, api_key)
+        if request.reference_images:
+            # When refs are present, route through the edit endpoint.
+            body["image_urls"] = [_to_data_uri(b) for b in request.reference_images]
+            return self._run("fal-ai/gemini-25-flash-image/edit", body)
+        return self._run("fal-ai/gemini-25-flash-image", body)
 
-    def _run_worker(self, model: str, body: dict, api_key: str) -> GenerateResult:
-        """Run the API call in a subprocess to avoid GIL-blocking SSL."""
-        out_fd, out_path = tempfile.mkstemp(suffix=".png")
-        os.close(out_fd)
+    def img2img(self, request: GenerateRequest) -> GenerateResult:
+        urls = [_to_data_uri(request.init_image)]
+        urls.extend(_to_data_uri(b) for b in request.reference_images)
+        body = {
+            "prompt": request.prompt,
+            "image_urls": urls,
+            "num_images": 1,
+            "output_format": "png",
+        }
+        return self._run("fal-ai/gemini-25-flash-image/edit", body)
 
-        # Clear status file
-        try:
-            with open(_status_file, "w") as f:
-                f.write("Starting...")
-        except OSError:
-            pass
 
-        config = json.dumps({
-            "api_key": api_key,
-            "model": model,
-            "body": body,
-            "output_path": out_path,
-            "status_path": _status_file,
-        })
-
-        try:
-            proc = subprocess.run(
-                [sys.executable, "-c", _WORKER_SCRIPT],
-                input=config,
-                capture_output=True,
-                text=True,
-                timeout=660,
-            )
-        except subprocess.TimeoutExpired:
-            self._cleanup(out_path)
-            raise ProviderError("Generation timed out")
-        except Exception as e:
-            self._cleanup(out_path)
-            raise ProviderError(f"Subprocess error: {e}")
-
-        if proc.returncode != 0:
-            self._cleanup(out_path)
-            raise ProviderError(f"Worker error (exit {proc.returncode}): {proc.stderr[:200]}")
-
-        stdout = proc.stdout.strip()
-        if not stdout:
-            self._cleanup(out_path)
-            raise ProviderError(f"No output from worker. stderr: {proc.stderr[:200]}")
-
-        try:
-            result = json.loads(stdout)
-        except json.JSONDecodeError:
-            self._cleanup(out_path)
-            raise ProviderError(f"Invalid worker output: {stdout[:200]}")
-
-        if "error" in result:
-            self._cleanup(out_path)
-            error_msg = result["error"]
-            if "401" in error_msg or "403" in error_msg:
-                raise AuthenticationError(error_msg)
-            elif "429" in error_msg:
-                raise RateLimitError(error_msg)
-            raise ProviderError(error_msg)
-
-        try:
-            with open(out_path, "rb") as f:
-                image_bytes = f.read()
-        finally:
-            self._cleanup(out_path)
-
-        return GenerateResult(image_bytes=image_bytes, seed=result.get("seed", 0))
-
-    def _cleanup(self, path: str):
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
-
+# ---------- helpers ---------------------------------------------------------
 
 def get_status() -> str:
-    """Read current status from the status file."""
+    """Read current status from the status file (used by the UI timer)."""
     try:
-        with open(_status_file, "r") as f:
+        with open(_STATUS_FILE, "r") as f:
             return f.read().strip()
     except (OSError, FileNotFoundError):
         return ""
@@ -352,18 +307,3 @@ def get_status() -> str:
 def _to_data_uri(png_bytes: bytes) -> str:
     b64 = base64.b64encode(png_bytes).decode("ascii")
     return f"data:image/png;base64,{b64}"
-
-
-def _read_fal_model_pref() -> str:
-    """Read fal_model from addon preferences, defaulting to 'flux'.
-
-    Lazy import of bpy so this module can also be imported in non-Blender
-    contexts (smoke tests, linting).
-    """
-    try:
-        import bpy
-        from ..preferences import ADDON_PKG
-        prefs = bpy.context.preferences.addons[ADDON_PKG].preferences
-        return getattr(prefs, "fal_model", "flux")
-    except Exception:
-        return "flux"

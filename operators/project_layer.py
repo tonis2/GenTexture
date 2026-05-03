@@ -18,7 +18,7 @@ from bpy_extras import view3d_utils
 import numpy as np
 
 from ..preferences import ADDON_PKG
-from ..providers import PROVIDERS, GenerateRequest
+from ..providers import PROVIDERS, GenerateRequest, CAP_INPAINT
 from ..utils.image import np_to_bpy, np_to_png_bytes, load_image_bytes
 from ..utils.threading import run_async, AsyncTask
 from ..utils.material import rebuild_layer_stack, get_or_create_layer_material
@@ -107,18 +107,32 @@ class GENTEX_OT_ProjectLayer(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         if context.scene.gentex_progress > 0:
+            cls.poll_message_set("A generation is already running")
             return False
         if context.object is None or context.object.mode != 'EDIT':
+            cls.poll_message_set("Enter Edit Mode on a mesh")
             return False
-        for obj in context.selected_objects:
-            if obj.type != 'MESH' or not obj.data.is_editmode:
-                continue
+
+        # objects_in_mode is the right API: in Edit Mode, selected_objects
+        # may be empty even though the active mesh is being edited.
+        edit_meshes = [o for o in context.objects_in_mode
+                       if o.type == 'MESH' and o.data.is_editmode]
+        if not edit_meshes:
+            cls.poll_message_set("No mesh currently in Edit Mode")
+            return False
+
+        for obj in edit_meshes:
             try:
                 bm = bmesh.from_edit_mesh(obj.data)
                 if any(f.select for f in bm.faces):
                     return True
             except Exception:
                 continue
+
+        cls.poll_message_set(
+            "Select faces to texture. Tip: switch to Face Select mode (3) "
+            "and click a face"
+        )
         return False
 
     def execute(self, context):
@@ -126,7 +140,8 @@ class GENTEX_OT_ProjectLayer(bpy.types.Operator):
 
         prefs = context.preferences.addons[ADDON_PKG].preferences
         provider_name = prefs.provider
-        api_key = prefs.get_api_key(provider_name)
+        settings = prefs.get_provider_settings(provider_name)
+        api_key = settings.get("api_key", "")
         if not api_key:
             self.report({'ERROR'}, "No API key configured.")
             return {'CANCELLED'}
@@ -159,7 +174,7 @@ class GENTEX_OT_ProjectLayer(bpy.types.Operator):
             return {'CANCELLED'}
 
         # 2. Selection mask through same camera
-        edit_objs = [o for o in context.selected_objects
+        edit_objs = [o for o in context.objects_in_mode
                      if o.type == 'MESH' and o.data.is_editmode]
         mask = render_selection_mask(
             region_w, region_h,
@@ -204,20 +219,34 @@ class GENTEX_OT_ProjectLayer(bpy.types.Operator):
         visible_resized = _nn_resize(visible, target_w, target_h)
         mask_resized = _nn_resize(mask, target_w, target_h)
 
+        # Gather reference images (any Image data-block, including layer images
+        # picked from the panel). Each is encoded once here on the main thread.
+        reference_pngs = []
+        for ref in scene.gentex_references:
+            if ref.image is None:
+                continue
+            try:
+                from ..utils.image import bpy_to_np
+                arr = bpy_to_np(ref.image)
+                reference_pngs.append(np_to_png_bytes(arr))
+            except Exception:
+                pass
+
         request = GenerateRequest(
             prompt=prompt,
             negative_prompt=scene.gentex_negative_prompt,
             width=target_w, height=target_h,
             init_image=np_to_png_bytes(visible_resized),
             mask_image=np_to_png_bytes(mask_resized),
+            reference_images=reference_pngs,
             strength=scene.gentex_strength,
         )
 
         provider_cls = PROVIDERS[provider_name]
-        provider = provider_cls()
-        # Read inpaint support from the instance: some providers (fal) decide
-        # this dynamically based on the configured model.
-        provider_supports_inpaint = getattr(provider, "supports_inpaint", False)
+        provider = provider_cls(settings)
+        # Capabilities are declared by the provider; falls back to
+        # client-side mask composite if it can't do real inpaint.
+        provider_supports_inpaint = CAP_INPAINT in provider_cls.capabilities()
 
         if not provider_supports_inpaint:
             # Provider can't do real inpaint; we'll do client-side composite below
@@ -230,7 +259,7 @@ class GENTEX_OT_ProjectLayer(bpy.types.Operator):
         composite_locally = not provider_supports_inpaint
 
         def do_generate():
-            return provider.generate(request, api_key)
+            return provider.generate(request)
 
         def on_complete(result):
             global _active_task
