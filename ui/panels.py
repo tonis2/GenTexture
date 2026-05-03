@@ -254,3 +254,8 @@ class GENTEX_PT_layers(bpy.types.Panel):
             row = layout.row()
             row.scale_y = 1.4
             row.operator("gentex.bake_layers", icon='RENDER_RESULT')
+
+            if obj.gentex_baked_image is not None:
+                box = layout.box()
+                box.label(text=f"Baked: {obj.gentex_baked_image.name}", icon='IMAGE_DATA')
+                box.operator("gentex.use_baked_image", icon='MATERIAL')

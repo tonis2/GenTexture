@@ -68,6 +68,7 @@ classes = (
     _gen_uv.GENTEX_OT_GenerateUV,
     _pl.GENTEX_OT_ProjectLayer,
     _bl.GENTEX_OT_BakeLayers,
+    _bl.GENTEX_OT_UseBakedImage,
     _layers.GENTEX_OT_LayerRemove,
     _layers.GENTEX_OT_LayerClear,
     _refs.GENTEX_OT_ReferenceAdd,

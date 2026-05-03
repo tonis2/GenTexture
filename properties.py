@@ -82,6 +82,16 @@ def register():
     bpy.utils.register_class(GenTexReferenceImage)
     bpy.types.Object.gentex_layers = bpy.props.CollectionProperty(type=GenTexLayer)
     bpy.types.Object.gentex_active_layer_index = bpy.props.IntProperty(default=-1)
+    bpy.types.Object.gentex_baked_image = bpy.props.PointerProperty(
+        name="Baked Image",
+        type=bpy.types.Image,
+        description="Most recent baked composite of all projected layers",
+    )
+    bpy.types.Object.gentex_baked_uv = bpy.props.StringProperty(
+        name="Baked UV",
+        description="UV layer the baked image was rendered into",
+        default="",
+    )
     bpy.types.Scene.gentex_references = bpy.props.CollectionProperty(type=GenTexReferenceImage)
     bpy.types.Scene.gentex_active_reference_index = bpy.props.IntProperty(default=-1)
 
@@ -89,6 +99,8 @@ def register():
 def unregister():
     del bpy.types.Object.gentex_layers
     del bpy.types.Object.gentex_active_layer_index
+    del bpy.types.Object.gentex_baked_image
+    del bpy.types.Object.gentex_baked_uv
     del bpy.types.Scene.gentex_references
     del bpy.types.Scene.gentex_active_reference_index
     bpy.utils.unregister_class(GenTexReferenceImage)

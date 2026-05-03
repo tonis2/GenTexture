@@ -62,6 +62,9 @@ class GENTEX_OT_BakeLayers(bpy.types.Operator):
         baked = np_to_bpy(result, f"GenTex Baked ({obj.name})")
         baked.update()
 
+        obj.gentex_baked_image = baked
+        obj.gentex_baked_uv = target_uv.name
+
         self.report({'INFO'}, f"Baked {len(obj.gentex_layers)} layer(s) -> {baked.name}")
         return {'FINISHED'}
 
@@ -86,9 +89,8 @@ class GENTEX_OT_BakeLayers(bpy.types.Operator):
                 else:
                     mask = mask[..., 0]
             else:
-                mask = color[..., 3]  # use image alpha
+                mask = color[..., 3]
 
-            # Combine with per-layer opacity
             f = (mask * layer.opacity).clip(0.0, 1.0)[..., None]
             out[..., :3] = f * color[..., :3] + (1.0 - f) * out[..., :3]
             out[..., 3] = (f[..., 0] + out[..., 3] * (1.0 - f[..., 0])).clip(0.0, 1.0)
@@ -97,10 +99,8 @@ class GENTEX_OT_BakeLayers(bpy.types.Operator):
 
     def _bake_one(self, obj, image, src_uv_name, dest_uv_name, w, h):
         """Bake a single image from src_uv -> dest_uv, returns (h, w, 4)."""
-        # Build a temp BMesh in object space (we're in OBJECT mode here)
         bm = bmesh.new()
         bm.from_mesh(obj.data)
-        # Triangulate so the bake shader's fan triangulation lines up with simple tris
         bmesh.ops.triangulate(bm, faces=bm.faces[:])
 
         src_layer = bm.loops.layers.uv.get(src_uv_name)
@@ -109,10 +109,6 @@ class GENTEX_OT_BakeLayers(bpy.types.Operator):
             bm.free()
             return None
 
-        # Source pixels (RGBA float) - bottom-to-top in Blender, but bake shader
-        # works in UV space directly so orientation just has to match the shader's
-        # sampling convention. The current shader samples from a GPU texture
-        # whose v=0 is at the bottom; Blender's image.pixels match that.
         src_w, src_h = image.size[0], image.size[1]
         src_pixels = np.empty(src_w * src_h * 4, dtype=np.float32)
         image.pixels.foreach_get(src_pixels)
@@ -123,6 +119,91 @@ class GENTEX_OT_BakeLayers(bpy.types.Operator):
             w, h,
         )
         bm.free()
-        # Bake reads bottom-to-top; flip to top-down to match np_to_bpy convention
-        # (which itself flips again before storing in Blender).
         return np.flipud(flat.reshape(h, w, 4))
+
+
+BAKED_MAT_MARKER = "gentex_baked_material"
+
+
+def _get_or_create_baked_material(obj, image, uv_name):
+    mat = None
+    for slot in obj.material_slots:
+        m = slot.material
+        if m and m.get(BAKED_MAT_MARKER):
+            mat = m
+            break
+    if mat is None:
+        mat = bpy.data.materials.new(name="gentex-baked-material")
+        mat.use_nodes = True
+        mat[BAKED_MAT_MARKER] = True
+        obj.data.materials.append(mat)
+
+    nt = mat.node_tree
+    nt.nodes.clear()
+    out = nt.nodes.new("ShaderNodeOutputMaterial")
+    out.location = (600, 0)
+    bsdf = nt.nodes.new("ShaderNodeBsdfPrincipled")
+    bsdf.location = (300, 0)
+    nt.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
+    tex = nt.nodes.new("ShaderNodeTexImage")
+    tex.location = (0, 0)
+    tex.image = image
+    nt.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
+    if uv_name:
+        uv = nt.nodes.new("ShaderNodeUVMap")
+        uv.location = (-300, 0)
+        uv.uv_map = uv_name
+        nt.links.new(uv.outputs["UV"], tex.inputs["Vector"])
+    return mat
+
+
+class GENTEX_OT_UseBakedImage(bpy.types.Operator):
+    bl_idname = "gentex.use_baked_image"
+    bl_label = "Use Baked Image Only"
+    bl_description = (
+        "Replace the layer-stack material with a simple material that shows "
+        "only the baked composite. All faces on this mesh are reassigned to it"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        if obj is None or obj.type != 'MESH':
+            cls.poll_message_set("Select a mesh")
+            return False
+        if obj.gentex_baked_image is None:
+            cls.poll_message_set("Bake the layers first")
+            return False
+        return True
+
+    def execute(self, context):
+        obj = context.active_object
+        baked = obj.gentex_baked_image
+        uv_name = obj.gentex_baked_uv
+        if not uv_name and obj.data.uv_layers.active:
+            uv_name = obj.data.uv_layers.active.name
+
+        mat = _get_or_create_baked_material(obj, baked, uv_name)
+
+        mat_index = -1
+        for i, slot in enumerate(obj.material_slots):
+            if slot.material == mat:
+                mat_index = i
+                break
+        if mat_index < 0:
+            obj.data.materials.append(mat)
+            mat_index = len(obj.material_slots) - 1
+
+        for poly in obj.data.polygons:
+            poly.material_index = mat_index
+
+        obj.active_material_index = mat_index
+
+        for window in context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
+
+        self.report({'INFO'}, f"Mesh now uses {baked.name}")
+        return {'FINISHED'}
