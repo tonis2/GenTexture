@@ -1,73 +1,76 @@
 bl_info = {
     "name": "GenTexture",
-    "author": "GenTexture",
+    "description": "Generate textures for 3D meshes using AI image generation APIs",
+    "author": "Tonis",
     "version": (0, 1, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > GenTexture, Image Editor > Sidebar > GenTexture",
-    "description": "Generate textures for 3D meshes using AI image generation APIs",
     "category": "Material",
 }
 
-# Support F3 > Reload Scripts: reload all submodules before importing
-if "bpy" in locals():
-    import importlib
-    from . import preferences
-    from . import utils
-    from .utils import image, threading
-    from . import providers
-    from .providers import stability, fal
-    from . import operators
-    from .operators import generate, project, generate_uv
-    from . import ui
-    from .ui import panels
-    from . import gpu
-    from .gpu import depth, bake, uv_normals
+_needs_reload = "preferences" in locals()
 
-    importlib.reload(image)
-    importlib.reload(threading)
-    importlib.reload(utils)
-    importlib.reload(depth)
-    importlib.reload(bake)
-    importlib.reload(uv_normals)
-    importlib.reload(gpu)
-    importlib.reload(providers)    # reload base first (resets PROVIDERS dict)
-    importlib.reload(stability)    # then providers re-register into it
-    importlib.reload(fal)
-    importlib.reload(preferences)
-    importlib.reload(generate)
-    importlib.reload(project)
-    importlib.reload(generate_uv)
-    importlib.reload(operators)
-    importlib.reload(panels)
-    importlib.reload(ui)
+from . import preferences
+from . import properties
+from .utils import image as _img, threading as _thr, material as _mat
+from .gpu import depth as _depth, bake as _bake, uv_normals as _uvn, mask as _mask, visible as _vis
+from .providers import stability as _stability, fal as _fal
+from .operators import generate as _gen, project as _proj, generate_uv as _gen_uv
+from .operators import project_layer as _pl, bake_layers as _bl, layers as _layers
+from .ui import panels as _panels
+
+if _needs_reload:
+    import importlib
+    preferences = importlib.reload(preferences)
+    properties = importlib.reload(properties)
+    _img = importlib.reload(_img)
+    _thr = importlib.reload(_thr)
+    _mat = importlib.reload(_mat)
+    _depth = importlib.reload(_depth)
+    _bake = importlib.reload(_bake)
+    _uvn = importlib.reload(_uvn)
+    _mask = importlib.reload(_mask)
+    _vis = importlib.reload(_vis)
+    # Reload providers AFTER the base providers/__init__.py (which holds the
+    # PROVIDERS dict) so re-registration uses the fresh dict.
+    from . import providers as _providers
+    _providers = importlib.reload(_providers)
+    _stability = importlib.reload(_stability)
+    _fal = importlib.reload(_fal)
+    _gen = importlib.reload(_gen)
+    _proj = importlib.reload(_proj)
+    _gen_uv = importlib.reload(_gen_uv)
+    _pl = importlib.reload(_pl)
+    _bl = importlib.reload(_bl)
+    _layers = importlib.reload(_layers)
+    _panels = importlib.reload(_panels)
+
 
 import bpy
 
-from .preferences import GenTexPreferences
-from .operators.generate import GENTEX_OT_Generate, GENTEX_OT_Cancel
-from .operators.project import GENTEX_OT_Project
-from .operators.generate_uv import GENTEX_OT_GenerateUV
-from .ui.panels import GENTEX_PT_generate, GENTEX_PT_project
-
-# Ensure providers are registered
-from .providers import stability  # noqa: F401
-from .providers import fal  # noqa: F401
-
 
 classes = (
-    GenTexPreferences,
-    GENTEX_OT_Generate,
-    GENTEX_OT_Cancel,
-    GENTEX_OT_Project,
-    GENTEX_OT_GenerateUV,
-    GENTEX_PT_generate,
-    GENTEX_PT_project,
+    preferences.GenTexPreferences,
+    _gen.GENTEX_OT_Generate,
+    _gen.GENTEX_OT_Cancel,
+    _proj.GENTEX_OT_Project,
+    _gen_uv.GENTEX_OT_GenerateUV,
+    _pl.GENTEX_OT_ProjectLayer,
+    _bl.GENTEX_OT_BakeLayers,
+    _layers.GENTEX_OT_LayerRemove,
+    _layers.GENTEX_OT_LayerClear,
+    _panels.GENTEX_UL_Layers,
+    _panels.GENTEX_PT_generate,
+    _panels.GENTEX_PT_project,
+    _panels.GENTEX_PT_layers,
 )
 
 
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
+
+    properties.register()
 
     scene = bpy.types.Scene
 
@@ -138,6 +141,8 @@ def unregister():
     del scene.gentex_info
     del scene.gentex_project_input
     del scene.gentex_project_bake
+
+    properties.unregister()
 
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

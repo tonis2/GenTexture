@@ -3,6 +3,16 @@ import bpy
 from ..preferences import ADDON_PKG
 
 
+class GENTEX_UL_Layers(bpy.types.UIList):
+    """List view for the projected texture layer stack."""
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname):
+        row = layout.row(align=True)
+        row.prop(item, "visible", text="", icon='HIDE_OFF' if item.visible else 'HIDE_ON', emboss=False)
+        row.prop(item, "name", text="", emboss=False)
+        row.prop(item, "opacity", text="", slider=True)
+
+
 class GENTEX_PT_generate(bpy.types.Panel):
     bl_label = "GenTexture"
     bl_idname = "GENTEX_PT_generate"
@@ -147,9 +157,10 @@ class GENTEX_PT_project(bpy.types.Panel):
                 box.label(text="No API key configured", icon='ERROR')
                 box.operator("preferences.addon_show", text="Open Preferences").module = ADDON_PKG
             elif in_edit:
-                row = layout.row()
-                row.scale_y = 1.5
-                row.operator("gentex.project", icon='MOD_UVPROJECT')
+                col = layout.column(align=True)
+                col.scale_y = 1.5
+                col.operator("gentex.project_layer", icon='IMAGE_RGB_ALPHA')
+                col.operator("gentex.project", icon='MOD_UVPROJECT')
             elif context.object is not None and context.object.type == 'MESH':
                 if context.object.data.uv_layers:
                     row = layout.row()
@@ -161,3 +172,48 @@ class GENTEX_PT_project(bpy.types.Panel):
             else:
                 box = layout.box()
                 box.label(text="Select a mesh object", icon='INFO')
+
+
+class GENTEX_PT_layers(bpy.types.Panel):
+    bl_label = "Projected Layers"
+    bl_idname = "GENTEX_PT_layers"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "GenTexture"
+    bl_parent_id = "GENTEX_PT_project"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.object is not None and context.object.type == 'MESH'
+
+    def draw(self, context):
+        layout = self.layout
+        obj = context.object
+
+        if not obj.gentex_layers:
+            layout.label(text="No layers yet. Use Project as New Layer.", icon='INFO')
+            return
+
+        layout.template_list(
+            "GENTEX_UL_Layers", "",
+            obj, "gentex_layers",
+            obj, "gentex_active_layer_index",
+            rows=4,
+        )
+
+        row = layout.row()
+        row.operator("gentex.layer_remove", icon='X', text="Remove")
+        row.operator("gentex.layer_clear", icon='TRASH', text="Clear")
+
+        layout.separator()
+
+        if obj.data.uv_layers:
+            layout.prop_search(
+                obj.data.uv_layers, "active",
+                obj.data, "uv_layers",
+                text="Bake Target UVs",
+            )
+            row = layout.row()
+            row.scale_y = 1.4
+            row.operator("gentex.bake_layers", icon='RENDER_RESULT')

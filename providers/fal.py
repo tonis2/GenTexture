@@ -143,8 +143,27 @@ class FalProvider(Provider):
     name = "fal"
     supports_depth = True
     supports_img2img = True
+    # supports_inpaint is set per-instance based on the configured model
+
+    def __init__(self):
+        self.model = _read_fal_model_pref()
+        # Nano Banana (Gemini 2.5 Flash Image) has no mask channel; we report
+        # that we don't support inpaint so the caller falls back to client-side
+        # composite of (init_image, ai_result, mask).
+        self.supports_inpaint = (self.model == 'flux')
+        self.supports_depth = (self.model == 'flux')
 
     def generate(self, request: GenerateRequest, api_key: str) -> GenerateResult:
+        if self.model == 'nano_banana':
+            # Nano Banana uses a single edit endpoint for img2img and a
+            # text-to-image endpoint for plain prompts.
+            if request.init_image is not None:
+                return self._generate_nano_banana_edit(request, api_key)
+            return self._generate_nano_banana(request, api_key)
+
+        # FLUX path
+        if request.init_image is not None and request.mask_image is not None:
+            return self._generate_inpaint(request, api_key)
         if request.normal_image is not None:
             return self._generate_normal(request, api_key)
         elif request.depth_image is not None:
@@ -153,6 +172,38 @@ class FalProvider(Provider):
             return self._generate_img2img(request, api_key)
         else:
             return self._generate_text2img(request, api_key)
+
+    def _generate_inpaint(self, request: GenerateRequest, api_key: str) -> GenerateResult:
+        body = {
+            "prompt": request.prompt,
+            "image_url": _to_data_uri(request.init_image),
+            "mask_url": _to_data_uri(request.mask_image),
+            "num_images": 1,
+            "output_format": "png",
+        }
+        if request.seed is not None:
+            body["seed"] = request.seed
+        return self._run_worker("fal-ai/flux-pro/v1/fill", body, api_key)
+
+    def _generate_nano_banana(self, request: GenerateRequest, api_key: str) -> GenerateResult:
+        body = {
+            "prompt": request.prompt,
+            "num_images": 1,
+            "output_format": "png",
+        }
+        return self._run_worker("fal-ai/gemini-25-flash-image", body, api_key)
+
+    def _generate_nano_banana_edit(self, request: GenerateRequest, api_key: str) -> GenerateResult:
+        # Edit endpoint: prompt + one or more reference images, returns an edited image.
+        # We don't pass the mask: Nano Banana ignores it. project_layer's local
+        # composite handles per-pixel masking using the mask we kept on the addon side.
+        body = {
+            "prompt": request.prompt,
+            "image_urls": [_to_data_uri(request.init_image)],
+            "num_images": 1,
+            "output_format": "png",
+        }
+        return self._run_worker("fal-ai/gemini-25-flash-image/edit", body, api_key)
 
     def _generate_text2img(self, request: GenerateRequest, api_key: str) -> GenerateResult:
         body = {
@@ -301,3 +352,18 @@ def get_status() -> str:
 def _to_data_uri(png_bytes: bytes) -> str:
     b64 = base64.b64encode(png_bytes).decode("ascii")
     return f"data:image/png;base64,{b64}"
+
+
+def _read_fal_model_pref() -> str:
+    """Read fal_model from addon preferences, defaulting to 'flux'.
+
+    Lazy import of bpy so this module can also be imported in non-Blender
+    contexts (smoke tests, linting).
+    """
+    try:
+        import bpy
+        from ..preferences import ADDON_PKG
+        prefs = bpy.context.preferences.addons[ADDON_PKG].preferences
+        return getattr(prefs, "fal_model", "flux")
+    except Exception:
+        return "flux"

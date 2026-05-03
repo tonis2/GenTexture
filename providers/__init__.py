@@ -10,6 +10,7 @@ class GenerateRequest:
     width: int = 1024
     height: int = 1024
     init_image: bytes | None = None      # PNG bytes for img2img
+    mask_image: bytes | None = None      # PNG bytes; white=regenerate, black=keep init
     depth_image: bytes | None = None     # PNG bytes for depth conditioning
     normal_image: bytes | None = None    # PNG bytes for normal map conditioning
     strength: float = 0.75              # Denoising strength for img2img/depth
@@ -46,6 +47,7 @@ class Provider(ABC):
     name: str = ""
     supports_depth: bool = False
     supports_img2img: bool = False
+    supports_inpaint: bool = False
 
     @abstractmethod
     def generate(self, request: GenerateRequest, api_key: str) -> GenerateResult:

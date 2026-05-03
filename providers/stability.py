@@ -84,8 +84,11 @@ class StabilityProvider(Provider):
     name = "stability"
     supports_depth = True
     supports_img2img = True
+    supports_inpaint = True
 
     def generate(self, request: GenerateRequest, api_key: str) -> GenerateResult:
+        if request.init_image is not None and request.mask_image is not None:
+            return self._generate_inpaint(request, api_key)
         if request.normal_image is not None:
             # Normal maps work with the structure endpoint (generic structural guidance)
             request_copy = GenerateRequest(
@@ -101,6 +104,22 @@ class StabilityProvider(Provider):
             return self._generate_img2img(request, api_key)
         else:
             return self._generate_text2img(request, api_key)
+
+    def _generate_inpaint(self, request: GenerateRequest, api_key: str) -> GenerateResult:
+        fields = {
+            "prompt": request.prompt,
+            "image": _file_field("image.png", request.init_image, "image/png"),
+            "mask": _file_field("mask.png", request.mask_image, "image/png"),
+            "output_format": "png",
+        }
+        if request.negative_prompt:
+            fields["negative_prompt"] = request.negative_prompt
+        if request.seed is not None:
+            fields["seed"] = str(request.seed)
+        return self._call_api(
+            f"{API_BASE}/v2beta/stable-image/edit/inpaint",
+            fields, api_key,
+        )
 
     def _generate_text2img(self, request: GenerateRequest, api_key: str) -> GenerateResult:
         fields = {
