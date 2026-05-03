@@ -161,17 +161,16 @@ class GENTEX_OT_ProjectLayer(bpy.types.Operator):
             return {'CANCELLED'}
 
         region_w, region_h = region.width, region.height
-        target_w = scene.gentex_width
-        target_h = scene.gentex_height
 
         scene.gentex_info = "Capturing viewport..."
         scene.gentex_progress = 1
 
-        # Render the viewport and selection mask at the viewport's native size
-        # — that's what the viewport projection matrix is set up for. Then
-        # bilinearly resize to the AI's target dimensions. Rendering directly
-        # at target size would mismatch the projection matrix's aspect ratio
-        # and squish the mask relative to the visible image.
+        # Render visible + mask at the viewport's native size and send them to
+        # the AI at exactly that size — that's what the viewport projection
+        # matrix is set up for, and what the per-loop screen-space UVs are
+        # normalised against. Resizing to a fixed square (e.g. 1024×1024)
+        # distorts the aspect ratio, which the AI then "bakes in" to the
+        # generated content and the bake misaligns from the geometry.
         try:
             visible = render_visible_image(area, region_w, region_h)
         except Exception as e:
@@ -218,8 +217,6 @@ class GENTEX_OT_ProjectLayer(bpy.types.Operator):
             return {'CANCELLED'}
 
         scene.gentex_info = "Generating..."
-        visible_resized = _bilinear_resize(visible, target_w, target_h)
-        mask_resized = _bilinear_resize(mask, target_w, target_h)
 
         # Gather reference images (any Image data-block, including layer images
         # picked from the panel). Each is encoded once here on the main thread.
@@ -237,9 +234,9 @@ class GENTEX_OT_ProjectLayer(bpy.types.Operator):
         request = GenerateRequest(
             prompt=prompt,
             negative_prompt=scene.gentex_negative_prompt,
-            width=target_w, height=target_h,
-            init_image=np_to_png_bytes(visible_resized),
-            mask_image=np_to_png_bytes(mask_resized),
+            width=region_w, height=region_h,
+            init_image=np_to_png_bytes(visible),
+            mask_image=np_to_png_bytes(mask),
             reference_images=reference_pngs,
             strength=scene.gentex_strength,
         )
@@ -255,10 +252,11 @@ class GENTEX_OT_ProjectLayer(bpy.types.Operator):
             request.mask_image = None
 
         # Capture data needed by the callback
-        captured_mask = mask_resized
-        captured_visible = visible_resized
+        captured_mask = mask
+        captured_visible = visible
         captured_per_obj = per_obj_uv
         composite_locally = not provider_supports_inpaint
+        captured_w, captured_h = region_w, region_h
 
         def do_generate():
             return provider.generate(request)
@@ -273,10 +271,12 @@ class GENTEX_OT_ProjectLayer(bpy.types.Operator):
             scene.gentex_info = ""
             try:
                 ai_image = load_image_bytes(result.image_bytes)
-                # Match viewport orientation
+                # Coerce to the viewport-native size that the screen-space UVs
+                # were captured against. Most providers return exactly what we
+                # asked for; some round to the nearest valid size internally.
                 ai_h, ai_w = ai_image.shape[:2]
-                if (ai_h, ai_w) != (target_h, target_w):
-                    ai_image = _nn_resize(ai_image, target_w, target_h)
+                if (ai_h, ai_w) != (captured_h, captured_w):
+                    ai_image = _nn_resize(ai_image, captured_w, captured_h)
 
                 # Composite locally if provider couldn't inpaint:
                 # final = mask * ai_image + (1 - mask) * visible

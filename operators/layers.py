@@ -188,39 +188,92 @@ class GENTEX_OT_LayerClear(bpy.types.Operator):
     bl_idname = "gentex.layer_clear"
     bl_label = "Clear All Layers"
     bl_description = (
-        "Remove every projected layer, free their UV maps, and restore the "
-        "mesh's material assignment"
+        "Wipe every GenTexture artifact on the active object: layers, projected "
+        "UV maps, baked images, generated source images, our materials, and "
+        "snapshot keys. Use to start a clean projection cycle"
     )
     bl_options = {'REGISTER'}
 
     @classmethod
     def poll(cls, context):
+        # Allow Clear even when there are no layers — the user might still have
+        # stray baked images, orphan UV maps, or stale material slots from a
+        # previous session that they want to wipe.
         obj = context.object
-        return obj is not None and bool(obj.gentex_layers)
+        if obj is None:
+            return False
+        if obj.gentex_layers:
+            return True
+        if obj.gentex_baked_image is not None:
+            return True
+        if any("Projected UVs" in uv.name for uv in obj.data.uv_layers):
+            return True
+        if any(s.material and (s.material.get(MARKER_KEY) or s.material.get(BAKED_MAT_MARKER))
+               for s in obj.material_slots):
+            return True
+        return False
 
     def execute(self, context):
         obj = context.object
 
+        # 1. Collect every image and material this addon owns BEFORE we drop
+        #    references — we'll orphan-purge at the end.
+        owned_images = set()
+        owned_mats = set()
+
+        for layer in obj.gentex_layers:
+            if layer.image is not None:
+                owned_images.add(layer.image.name)
+            if layer.mask_image is not None:
+                owned_images.add(layer.mask_image.name)
+        if obj.gentex_baked_image is not None:
+            owned_images.add(obj.gentex_baked_image.name)
+
+        # Sweep any GenTex-named images that aren't referenced from this
+        # object's layer list (intermediate bakes, stale layer images). They're
+        # identifiable by the "GenTex" prefix written in project_layer/bake_layers.
+        for img in bpy.data.images:
+            if img.name.startswith("GenTex "):
+                owned_images.add(img.name)
+
+        for slot in obj.material_slots:
+            m = slot.material
+            if m and (m.get(MARKER_KEY) or m.get(BAKED_MAT_MARKER)):
+                owned_mats.add(m.name)
+
+        # 2. Free per-layer UV maps + the orphan "Projected UVs *" sweep.
         for layer in obj.gentex_layers:
             _remove_uv_layer(obj, layer.uv_name)
-
-        # Sweep any leftover "Projected UVs *" layers (from earlier sessions
-        # where remove didn't clean up). Collect names first — iterating uv
-        # references and removing them in place invalidates the rest.
-        orphan_names = [uv.name for uv in obj.data.uv_layers
-                        if "Projected UVs" in uv.name]
-        for name in orphan_names:
+        orphan_uv_names = [uv.name for uv in obj.data.uv_layers
+                           if "Projected UVs" in uv.name]
+        for name in orphan_uv_names:
             _remove_uv_layer(obj, name)
 
+        # 3. Strip the layer-stack and baked-material slots from the object.
         _remove_gentex_material_slots(obj)
 
+        # 4. Reset all GenTex state on the object.
         obj.gentex_layers.clear()
         obj.gentex_active_layer_index = -1
         obj.gentex_baked_image = None
         obj.gentex_baked_uv = ""
         if obj.gentex_use_baked:
             obj.gentex_use_baked = False
-        if SNAPSHOT_KEY in obj.keys():
-            del obj[SNAPSHOT_KEY]
+        # Both old and new snapshot keys (they coexist briefly across versions).
+        for key in (SNAPSHOT_KEY, "gentex_baked_face_orig_idx"):
+            if key in obj.keys():
+                del obj[key]
+
+        # 5. Now that the object no longer references any of them, purge the
+        #    image/material data-blocks from bpy.data so the file isn't bloated
+        #    with `.001` / `.013` accumulations from repeated projections.
+        for name in owned_images:
+            img = bpy.data.images.get(name)
+            if img is not None and img.users == 0:
+                bpy.data.images.remove(img)
+        for name in owned_mats:
+            mat = bpy.data.materials.get(name)
+            if mat is not None and mat.users == 0:
+                bpy.data.materials.remove(mat)
 
         return {'FINISHED'}
