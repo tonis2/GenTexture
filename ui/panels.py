@@ -258,4 +258,4 @@ class GENTEX_PT_layers(bpy.types.Panel):
             if obj.gentex_baked_image is not None:
                 box = layout.box()
                 box.label(text=f"Baked: {obj.gentex_baked_image.name}", icon='IMAGE_DATA')
-                box.operator("gentex.use_baked_image", icon='MATERIAL')
+                box.prop(obj, "gentex_use_baked", toggle=True, icon='MATERIAL')

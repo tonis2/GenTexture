@@ -1,6 +1,11 @@
 import bpy
 
 
+def _use_baked_changed(self, context):
+    from .operators.bake_layers import apply_baked_toggle
+    apply_baked_toggle(self, self.gentex_use_baked)
+
+
 def _layer_changed(self, context):
     """Rebuild the host object's layer-stack material when a layer changes."""
     # Lazy import to avoid a circular import at module load.
@@ -92,6 +97,12 @@ def register():
         description="UV layer the baked image was rendered into",
         default="",
     )
+    bpy.types.Object.gentex_use_baked = bpy.props.BoolProperty(
+        name="Use Baked Image",
+        description="Show the baked composite instead of the layer-stack shader",
+        default=False,
+        update=_use_baked_changed,
+    )
     bpy.types.Scene.gentex_references = bpy.props.CollectionProperty(type=GenTexReferenceImage)
     bpy.types.Scene.gentex_active_reference_index = bpy.props.IntProperty(default=-1)
 
@@ -101,6 +112,7 @@ def unregister():
     del bpy.types.Object.gentex_active_layer_index
     del bpy.types.Object.gentex_baked_image
     del bpy.types.Object.gentex_baked_uv
+    del bpy.types.Object.gentex_use_baked
     del bpy.types.Scene.gentex_references
     del bpy.types.Scene.gentex_active_reference_index
     bpy.utils.unregister_class(GenTexReferenceImage)
