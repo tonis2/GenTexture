@@ -3,26 +3,66 @@ import bpy
 from ..preferences import ADDON_PKG
 
 
+# ──────────────────────────── UIList renderers ────────────────────────────
+
+
 class GENTEX_UL_Layers(bpy.types.UIList):
-    """List view for the projected texture layer stack."""
+    """Row in the projected-layer stack."""
 
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname):
         row = layout.row(align=True)
-        row.prop(item, "visible", text="", icon='HIDE_OFF' if item.visible else 'HIDE_ON', emboss=False)
+        row.prop(item, "visible", text="",
+                 icon='HIDE_OFF' if item.visible else 'HIDE_ON', emboss=False)
         row.prop(item, "name", text="", emboss=False)
         row.prop(item, "opacity", text="", slider=True)
 
 
 class GENTEX_UL_References(bpy.types.UIList):
-    """List view for reference images fed alongside the prompt."""
+    """Row in the reference-image list."""
 
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname):
-        row = layout.row(align=True)
-        # Image picker — works for any Blender image, including layer images
-        row.prop(item, "image", text="")
+        layout.prop(item, "image", text="")
+
+
+# ──────────────────────────── shared bits ────────────────────────────
+
+
+def _has_api_key(prefs) -> bool:
+    return bool(prefs.get_api_key(prefs.provider) if prefs.provider else "")
+
+
+def _draw_api_key_warning(layout, prefs):
+    box = layout.box()
+    box.label(text="No API key configured", icon='ERROR')
+    box.operator("preferences.addon_show", text="Open Preferences").module = ADDON_PKG
+
+
+def _draw_status(layout, scene) -> bool:
+    """If a generation is running or errored, draw a status box. Returns True
+    when the caller should skip drawing the action button."""
+    if scene.gentex_progress > 0:
+        box = layout.box()
+        box.label(text=scene.gentex_info or "Working...", icon='SORTTIME')
+        layout.operator("gentex.cancel", icon='CANCEL')
+        return True
+    if scene.gentex_info and scene.gentex_info.startswith("Error:"):
+        box = layout.box()
+        box.label(text=scene.gentex_info, icon='ERROR')
+    return False
+
+
+def _draw_action(layout, op_id: str, icon: str = 'RENDER_STILL'):
+    row = layout.row()
+    row.scale_y = 1.5
+    row.operator(op_id, icon=icon)
+
+
+# ──────────────────────────── Image Editor panel ────────────────────────────
 
 
 class GENTEX_PT_generate(bpy.types.Panel):
+    """2D texture generation in the Image Editor sidebar."""
+
     bl_label = "GenTexture"
     bl_idname = "GENTEX_PT_generate"
     bl_space_type = 'IMAGE_EDITOR'
@@ -34,60 +74,40 @@ class GENTEX_PT_generate(bpy.types.Panel):
         layout.use_property_split = True
         layout.use_property_decorate = False
         scene = context.scene
-
-        # Provider selection
         prefs = context.preferences.addons[ADDON_PKG].preferences
+
         layout.prop(prefs, "provider")
 
-        layout.separator()
+        if not _has_api_key(prefs):
+            _draw_api_key_warning(layout, prefs)
+            return
 
-        # Prompt
         col = layout.column(align=True)
         col.label(text="Prompt:")
         col.prop(scene, "gentex_prompt", text="")
         col.label(text="Negative:")
         col.prop(scene, "gentex_negative_prompt", text="")
 
-        layout.separator()
-
-        # Size
         row = layout.row(align=True)
         row.prop(scene, "gentex_width")
         row.prop(scene, "gentex_height")
 
-        # Init image strength
-        if context.space_data and hasattr(context.space_data, 'image') and context.space_data.image:
+        if context.space_data and getattr(context.space_data, 'image', None):
             layout.prop(scene, "gentex_strength")
 
         layout.separator()
-
-        # Actions
-        if scene.gentex_progress > 0:
-            box = layout.box()
-            box.label(text=scene.gentex_info or "Working...", icon='SORTTIME')
-            layout.operator("gentex.cancel", icon='CANCEL')
-        elif scene.gentex_info and scene.gentex_info.startswith("Error:"):
-            box = layout.box()
-            box.label(text=scene.gentex_info, icon='ERROR')
-            row = layout.row()
-            row.scale_y = 1.5
-            row.operator("gentex.generate", icon='RENDER_STILL')
-        else:
-            # Validation
-            api_key = prefs.get_api_key(prefs.provider) if prefs.provider else ""
-            if not api_key:
-                box = layout.box()
-                box.label(text="No API key configured", icon='ERROR')
-                box.operator("preferences.addon_show", text="Open Preferences").module = ADDON_PKG
-            else:
-                row = layout.row()
-                row.scale_y = 1.5
-                row.operator("gentex.generate", icon='RENDER_STILL')
+        if not _draw_status(layout, scene):
+            _draw_action(layout, "gentex.generate", icon='RENDER_STILL')
 
 
-class GENTEX_PT_project(bpy.types.Panel):
+# ──────────────────────────── 3D Viewport: parent ────────────────────────────
+
+
+class GENTEX_PT_main(bpy.types.Panel):
+    """Parent panel for the projection workflow in the 3D viewport."""
+
     bl_label = "GenTexture"
-    bl_idname = "GENTEX_PT_project"
+    bl_idname = "GENTEX_PT_main"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "GenTexture"
@@ -97,34 +117,43 @@ class GENTEX_PT_project(bpy.types.Panel):
         obj = context.object
         if obj is None or obj.type != 'MESH':
             return False
-        if obj.mode == 'EDIT':
-            return True
-        # In Object Mode only show if there are layers to bake;
-        # otherwise hide to keep things uncluttered.
-        return bool(obj.gentex_layers)
+        # Show in Edit Mode (to project) and in Object Mode if there's
+        # something to manage. Otherwise the panel quietly disappears.
+        return obj.mode == 'EDIT' or bool(obj.gentex_layers)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        prefs = context.preferences.addons[ADDON_PKG].preferences
+        layout.prop(prefs, "provider")
+        if not _has_api_key(prefs):
+            _draw_api_key_warning(layout, prefs)
+
+
+# ──────────────────────────── Project Layer (Edit Mode) ────────────────────────────
+
+
+class GENTEX_PT_project(bpy.types.Panel):
+    """Primary action: project the prompt onto the selected faces as a new layer."""
+
+    bl_label = "Project Layer"
+    bl_idname = "GENTEX_PT_project"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "GenTexture"
+    bl_parent_id = "GENTEX_PT_main"
+
+    @classmethod
+    def poll(cls, context):
+        return context.object is not None and context.object.mode == 'EDIT'
 
     def draw(self, context):
         layout = self.layout
         layout.use_property_split = True
         layout.use_property_decorate = False
         scene = context.scene
-
-        in_edit = context.object is not None and context.object.mode == 'EDIT'
-
-        # Object Mode is only reachable here when there are existing layers
-        # to bake (poll guard). Show a minimal view focused on baking.
-        if not in_edit:
-            box = layout.box()
-            box.label(text=f"{len(context.object.gentex_layers)} layer(s) on this mesh",
-                      icon='RENDERLAYERS')
-            box.label(text="Use the Projected Layers panel below to bake.")
-            return
-
-        # ---------- Edit Mode: full projection UI ----------
         prefs = context.preferences.addons[ADDON_PKG].preferences
-        layout.prop(prefs, "provider")
-
-        layout.separator()
 
         col = layout.column(align=True)
         col.label(text="Prompt:")
@@ -132,34 +161,66 @@ class GENTEX_PT_project(bpy.types.Panel):
         col.label(text="Negative:")
         col.prop(scene, "gentex_negative_prompt", text="")
 
+        if not _has_api_key(prefs):
+            return
+
         layout.separator()
+        if not _draw_status(layout, scene):
+            _draw_action(layout, "gentex.project_layer", icon='IMAGE_RGB_ALPHA')
+
+
+# ──────────────────────────── Settings (collapsed) ────────────────────────────
+
+
+class GENTEX_PT_settings(bpy.types.Panel):
+    """Output size, conditioning input, strength — hidden by default."""
+
+    bl_label = "Settings"
+    bl_idname = "GENTEX_PT_settings"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "GenTexture"
+    bl_parent_id = "GENTEX_PT_project"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        scene = context.scene
 
         row = layout.row(align=True)
         row.prop(scene, "gentex_width")
         row.prop(scene, "gentex_height")
 
-        layout.separator()
-
+        layout.prop(scene, "gentex_strength")
         layout.prop(scene, "gentex_depth_size")
         layout.prop(scene, "gentex_project_input")
-        if scene.gentex_project_input == 'COLOR':
-            layout.prop(scene, "gentex_strength")
-        layout.prop(scene, "gentex_strength")
 
-        layout.prop(scene, "gentex_project_bake")
-        if scene.gentex_project_bake:
-            for obj in context.selected_objects:
-                if hasattr(obj, "data") and hasattr(obj.data, "uv_layers") and len(obj.data.uv_layers) > 0:
-                    layout.prop_search(
-                        obj.data.uv_layers, "active",
-                        obj.data, "uv_layers",
-                        text=f"{obj.name} Target UVs"
-                    )
 
-        # ---------- Reference images ----------
-        layout.separator()
-        header = layout.row(align=True)
-        header.label(text=f"References ({len(scene.gentex_references)})", icon='IMAGE_DATA')
+# ──────────────────────────── References (collapsed) ────────────────────────────
+
+
+class GENTEX_PT_references(bpy.types.Panel):
+    """Reference images fed alongside the prompt."""
+
+    bl_label = "References"
+    bl_idname = "GENTEX_PT_references"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "GenTexture"
+    bl_parent_id = "GENTEX_PT_project"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw_header(self, context):
+        n = len(context.scene.gentex_references)
+        if n:
+            self.layout.label(text=f"({n})")
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+        prefs = context.preferences.addons[ADDON_PKG].preferences
 
         if scene.gentex_references:
             layout.template_list(
@@ -168,65 +229,46 @@ class GENTEX_PT_project(bpy.types.Panel):
                 scene, "gentex_active_reference_index",
                 rows=2,
             )
-
-        row = layout.row(align=True)
-        row.operator("gentex.reference_add", text="Add Slot", icon='ADD')
-        row.operator("gentex.reference_load", text="Load File...", icon='FILEBROWSER')
-        if context.object and context.object.gentex_layers:
-            layout.operator("gentex.reference_add_from_active_layer",
-                            text="Use Active Layer", icon='RENDERLAYERS')
-        if scene.gentex_references:
             row = layout.row(align=True)
             row.operator("gentex.reference_remove", text="Remove", icon='X')
             row.operator("gentex.reference_clear", text="Clear", icon='TRASH')
 
-        # Provider hint: only providers declaring CAP_REFERENCE_IMAGES use refs
+        row = layout.row(align=True)
+        row.operator("gentex.reference_add", text="Add Slot", icon='ADD')
+        row.operator("gentex.reference_load", text="Load File", icon='FILEBROWSER')
+        if context.object and context.object.gentex_layers:
+            row.operator("gentex.reference_add_from_active_layer",
+                         text="From Layer", icon='RENDERLAYERS')
+
         if scene.gentex_references and prefs.provider:
             from ..providers import PROVIDERS, CAP_REFERENCE_IMAGES
             pcls = PROVIDERS.get(prefs.provider)
             if pcls and CAP_REFERENCE_IMAGES not in pcls.capabilities():
                 box = layout.box()
-                box.label(text="Active provider ignores reference images", icon='INFO')
-                box.label(text="Switch to a provider with multi-image support")
+                box.label(text="Active provider ignores references", icon='INFO')
 
-        layout.separator()
 
-        if scene.gentex_progress > 0:
-            box = layout.box()
-            box.label(text=scene.gentex_info or "Working...", icon='SORTTIME')
-            layout.operator("gentex.cancel", icon='CANCEL')
-        elif scene.gentex_info and scene.gentex_info.startswith("Error:"):
-            box = layout.box()
-            box.label(text=scene.gentex_info, icon='ERROR')
-            row = layout.row()
-            row.scale_y = 1.5
-            row.operator("gentex.project_layer", icon='IMAGE_RGB_ALPHA')
-        else:
-            api_key = prefs.get_api_key(prefs.provider) if prefs.provider else ""
-            if not api_key:
-                box = layout.box()
-                box.label(text="No API key configured", icon='ERROR')
-                box.operator("preferences.addon_show", text="Open Preferences").module = ADDON_PKG
-            else:
-                col = layout.column(align=True)
-                col.scale_y = 1.5
-                col.operator("gentex.project_layer", icon='IMAGE_RGB_ALPHA')
-                col.operator("gentex.project", icon='MOD_UVPROJECT')
+# ──────────────────────────── Layers ────────────────────────────
 
 
 class GENTEX_PT_layers(bpy.types.Panel):
-    bl_label = "Projected Layers"
+    """Layer stack management + bake to a single UV-space texture."""
+
+    bl_label = "Layers"
     bl_idname = "GENTEX_PT_layers"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "GenTexture"
-    bl_parent_id = "GENTEX_PT_project"
-    bl_options = {'DEFAULT_CLOSED'}
+    bl_parent_id = "GENTEX_PT_main"
 
     @classmethod
     def poll(cls, context):
         obj = context.object
         return obj is not None and obj.type == 'MESH' and bool(obj.gentex_layers)
+
+    def draw_header(self, context):
+        n = len(context.object.gentex_layers)
+        self.layout.label(text=f"({n})")
 
     def draw(self, context):
         layout = self.layout
@@ -239,23 +281,41 @@ class GENTEX_PT_layers(bpy.types.Panel):
             rows=4,
         )
 
+        row = layout.row(align=True)
+        row.operator("gentex.layer_remove", text="Remove", icon='X')
+        row.operator("gentex.layer_clear", text="Clear", icon='TRASH')
+
+
+class GENTEX_PT_bake(bpy.types.Panel):
+    """Bake the layer stack into a single UV-space texture, then optionally
+    swap the mesh's material to that flat texture."""
+
+    bl_label = "Bake to UV"
+    bl_idname = "GENTEX_PT_bake"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "GenTexture"
+    bl_parent_id = "GENTEX_PT_layers"
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.object
+        return obj is not None and bool(obj.data.uv_layers)
+
+    def draw(self, context):
+        layout = self.layout
+        obj = context.object
+
+        layout.prop_search(
+            obj.data.uv_layers, "active",
+            obj.data, "uv_layers",
+            text="Target UV",
+        )
         row = layout.row()
-        row.operator("gentex.layer_remove", icon='X', text="Remove")
-        row.operator("gentex.layer_clear", icon='TRASH', text="Clear")
+        row.scale_y = 1.4
+        row.operator("gentex.bake_layers", text="Bake Layers", icon='RENDER_RESULT')
 
-        layout.separator()
-
-        if obj.data.uv_layers:
-            layout.prop_search(
-                obj.data.uv_layers, "active",
-                obj.data, "uv_layers",
-                text="Bake Target UVs",
-            )
-            row = layout.row()
-            row.scale_y = 1.4
-            row.operator("gentex.bake_layers", icon='RENDER_RESULT')
-
-            if obj.gentex_baked_image is not None:
-                box = layout.box()
-                box.label(text=f"Baked: {obj.gentex_baked_image.name}", icon='IMAGE_DATA')
-                box.prop(obj, "gentex_use_baked", toggle=True, icon='MATERIAL')
+        if obj.gentex_baked_image is not None:
+            col = layout.column(align=True)
+            col.label(text=obj.gentex_baked_image.name, icon='IMAGE_DATA')
+            col.prop(obj, "gentex_use_baked", toggle=True, icon='MATERIAL')

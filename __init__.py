@@ -78,8 +78,12 @@ classes = (
     _panels.GENTEX_UL_Layers,
     _panels.GENTEX_UL_References,
     _panels.GENTEX_PT_generate,
+    _panels.GENTEX_PT_main,
     _panels.GENTEX_PT_project,
+    _panels.GENTEX_PT_settings,
+    _panels.GENTEX_PT_references,
     _panels.GENTEX_PT_layers,
+    _panels.GENTEX_PT_bake,
 )
 
 
