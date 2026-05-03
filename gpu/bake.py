@@ -49,8 +49,45 @@ def bake_to_uv(src_pixels: np.ndarray, src_width: int, src_height: int,
     elif drawn_pixels == 0:
         print(f"[GenTex bake] {tri_count} triangles, but 0 pixels drawn — "
               f"check that destination UV layout has non-degenerate UVs")
+    else:
+        # Edge-pad the bake. Without this, bilinear filtering at runtime
+        # samples across UV island boundaries into alpha=0 pixels, which the
+        # baked material's alpha-mix renders as the fallback grey — visible as
+        # dashed seams along every UV island border. Dilating by ~8px hides
+        # those seams without noticeably affecting the painted regions.
+        _dilate_painted(out, iterations=8)
 
     return out.ravel()
+
+
+def _dilate_painted(out: np.ndarray, iterations: int = 8):
+    """Bleed painted pixels outward into adjacent transparent ones.
+
+    For each transparent pixel that touches at least one painted (alpha>0)
+    neighbor, copy the average of those painted neighbors' colors and set
+    alpha=1. Repeat `iterations` times. In-place.
+    """
+    H, W = out.shape[:2]
+    for _ in range(iterations):
+        alpha = out[..., 3] > 0
+        if alpha.all():
+            return
+        padded = np.pad(out, ((1, 1), (1, 1), (0, 0)), mode='constant')
+        padded_a = np.pad(alpha, ((1, 1), (1, 1)), mode='constant').astype(np.float32)
+        accum = np.zeros_like(out)
+        count = np.zeros((H, W), dtype=np.float32)
+        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1),
+                       (-1, -1), (-1, 1), (1, -1), (1, 1)):
+            n_rgba = padded[1 + dy:1 + dy + H, 1 + dx:1 + dx + W]
+            n_a = padded_a[1 + dy:1 + dy + H, 1 + dx:1 + dx + W]
+            accum += n_rgba * n_a[..., None]
+            count += n_a
+        fill = (~alpha) & (count > 0)
+        if not fill.any():
+            return
+        avg = accum / np.maximum(count, 1.0)[..., None]
+        avg[..., 3] = 1.0
+        out[fill] = avg[fill]
 
 
 def _rasterize_tri(out: np.ndarray, src_img: np.ndarray,

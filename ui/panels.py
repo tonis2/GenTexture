@@ -209,9 +209,9 @@ class GENTEX_PT_settings(bpy.types.Panel):
         layout.use_property_decorate = False
         scene = context.scene
 
-        # Width/height aren't in this panel anymore: the projection always
-        # runs at the viewport's native size so the AI's image and the
-        # captured screen-space UVs share the same aspect ratio.
+        row = layout.row(align=True)
+        row.prop(scene, "gentex_width")
+        row.prop(scene, "gentex_height")
         layout.prop(scene, "gentex_strength")
         layout.prop(scene, "gentex_depth_size")
         layout.prop(scene, "gentex_project_input")

@@ -162,15 +162,25 @@ class GENTEX_OT_ProjectLayer(bpy.types.Operator):
 
         region_w, region_h = region.width, region.height
 
+        # If the user set a target size in the UI, scale the viewport-native
+        # dimensions to fit inside it while preserving aspect. Aspect must be
+        # preserved — the screen-space UVs were captured against the viewport
+        # projection matrix, so any aspect change would distort the AI's view
+        # of the geometry and the projected texture would misalign.
+        target_w = scene.gentex_width
+        target_h = scene.gentex_height
+        if target_w > 0 and target_h > 0 and region_w > 0 and region_h > 0:
+            scale = min(target_w / region_w, target_h / region_h)
+            region_w = max(1, int(region_w * scale))
+            region_h = max(1, int(region_h * scale))
+
         scene.gentex_info = "Capturing viewport..."
         scene.gentex_progress = 1
 
-        # Render visible + mask at the viewport's native size and send them to
-        # the AI at exactly that size — that's what the viewport projection
-        # matrix is set up for, and what the per-loop screen-space UVs are
-        # normalised against. Resizing to a fixed square (e.g. 1024×1024)
-        # distorts the aspect ratio, which the AI then "bakes in" to the
-        # generated content and the bake misaligns from the geometry.
+        # Render visible + mask at the (aspect-preserved) target size and send
+        # them to the AI at exactly that size. Resizing to a fixed square (e.g.
+        # 1024×1024) distorts the aspect ratio, which the AI then "bakes in"
+        # to the generated content and the bake misaligns from the geometry.
         try:
             visible = render_visible_image(area, region_w, region_h)
         except Exception as e:
