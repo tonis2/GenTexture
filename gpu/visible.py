@@ -36,11 +36,24 @@ def render_visible_image(area, region_width: int, region_height: int) -> np.ndar
             hidden_spaces.append(sp)
             sp.overlay.show_overlays = False
 
+    # Per-object wire display (`obj.show_wire = True` or `display_type='WIRE'`)
+    # forces a wireframe in solid shading regardless of the overlay toggle, so
+    # FLUX preserves those edges outside the mask. Force the active object to
+    # plain solid display for the render and restore after.
+    obj = bpy.context.active_object
+    show_wire_prev = None
+    display_type_prev = None
+    if obj is not None:
+        show_wire_prev = obj.show_wire
+        display_type_prev = obj.display_type
+        obj.show_wire = False
+        if obj.display_type in {'WIRE', 'BOUNDS'}:
+            obj.display_type = 'SOLID'
+
     # Edit Mode bakes the mesh wireframe straight into `render.opengl` output
     # regardless of the overlay toggle — FLUX then preserves that wire pattern
     # outside the mask, polluting every subsequent UV sample. Drop to Object
     # Mode for the render so the mesh comes back clean.
-    obj = bpy.context.active_object
     was_edit = obj is not None and obj.mode == 'EDIT'
     if was_edit:
         bpy.ops.object.mode_set(mode='OBJECT')
@@ -60,6 +73,9 @@ def render_visible_image(area, region_width: int, region_height: int) -> np.ndar
             bpy.ops.object.mode_set(mode='EDIT')
         for sp in hidden_spaces:
             sp.overlay.show_overlays = True
+        if obj is not None and show_wire_prev is not None:
+            obj.show_wire = show_wire_prev
+            obj.display_type = display_type_prev
         scene.render.resolution_x = res_x
         scene.render.resolution_y = res_y
         scene.render.filepath = render_filepath
