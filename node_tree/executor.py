@@ -4,9 +4,12 @@ Run flow:
   1. Resolve the viewport context once (3D area/region/space + edit-mode meshes).
   2. Walk every terminal node (Output Image, Project Layer) backward through
      input links to build a deduplicated execution order.
-  3. For each node in order, dispatch its evaluate() to a worker thread via
-     utils.threading.run_async. On completion, advance to the next node.
-     Sequential — the next API call only fires after the current one returns.
+  3. For each node in order:
+       - if `node.runs_async` is True (Generate), dispatch its evaluate() to
+         a worker thread via `utils.threading.run_async`;
+       - otherwise run it inline on the main thread, deferred by a brief
+         timer so the just-set status message gets a chance to paint.
+     The next node only starts after the current one returns/completes.
 """
 
 from __future__ import annotations
@@ -133,28 +136,33 @@ def run(tree, info_setter: Callable[[str], None], on_finish: Callable[[], None])
         info_setter(f"[{i + 1}/{total}] {node.bl_label}: {node.name}...")
 
         if not getattr(node, "runs_async", False):
-            # Run inline on the main thread. Anything touching bpy.data /
-            # bpy.context / bpy.ops belongs here. Defer the next step through
-            # a timer so the UI gets a chance to redraw between nodes.
-            try:
-                node.evaluate(ctx)
-            except Exception as err:
-                info_setter(f"Error in {node.name}: {err}")
-                import traceback
-                traceback.print_exc()
-                _active_task = None
-                on_finish()
-                return
-            if _active_task and _active_task.is_cancelled:
-                info_setter("Cancelled")
-                _active_task = None
-                on_finish()
-                return
-
-            def _next():
+            # Defer the evaluate via a timer so the status message just set
+            # by info_setter() actually paints before the (potentially heavy)
+            # main-thread work begins — otherwise the UI looks frozen showing
+            # the previous node's status until evaluate() returns.
+            def _run_sync():
+                global _active_task
+                try:
+                    node.evaluate(ctx)
+                except Exception as err:
+                    info_setter(f"Error in {node.name}: {err}")
+                    import traceback
+                    traceback.print_exc()
+                    _active_task = None
+                    on_finish()
+                    return None
+                if _active_task and _active_task.is_cancelled:
+                    info_setter("Cancelled")
+                    _active_task = None
+                    on_finish()
+                    return None
                 step(i + 1)
                 return None
-            bpy.app.timers.register(_next, first_interval=0.01)
+            # Tag a redraw so the new status message paints right now.
+            for w in bpy.context.window_manager.windows:
+                for area in w.screen.areas:
+                    area.tag_redraw()
+            bpy.app.timers.register(_run_sync, first_interval=0.05)
             return
 
         def task():

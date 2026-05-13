@@ -8,6 +8,7 @@ keeps the longer-form provider/api-key info.
 import bpy
 
 from ..preferences import ADDON_PKG
+from .templates import TEMPLATES
 from .tree import TREE_IDNAME
 
 
@@ -74,6 +75,13 @@ class GENTEX_PT_pipeline(bpy.types.Panel):
         layout.operator(
             "preferences.addon_show", text="Provider Settings", icon='PREFERENCES',
         ).module = ADDON_PKG
+
+        layout.separator()
+        layout.label(text="Templates")
+        col = layout.column(align=True)
+        for key, (label, _) in TEMPLATES.items():
+            op = col.operator("gentex.add_template", text=label, icon='NODETREE')
+            op.template = key
 
         layout.separator()
         _draw_run_controls(layout, context, compact=False)

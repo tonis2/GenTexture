@@ -322,8 +322,7 @@ class FalFluxGeneralProvider(_FalBase):
             # Spread weight evenly across references and cap at 0.6 per ref.
             # Higher scales (≥0.8) overpower the depth ControlNet and FLUX
             # starts duplicating reference features — e.g. two heads/poms on
-            # a single mesh. The fal_test/ bench (cat_ref_scale_* configs)
-            # confirmed 0.5–0.6 is the sweet spot when depth is also on.
+            # a single mesh. 0.5–0.6 is the sweet spot when depth is also on.
             per_ref = min(0.6, 1.0 / len(request.reference_images))
             body["ip_adapters"] = [{
                 "path": _FLUX_IP_ADAPTER_PATH,

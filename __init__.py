@@ -38,6 +38,7 @@ from .node_tree.nodes import output_image as _nt_output_image
 from .node_tree.nodes import project_layer as _nt_project_layer
 from .node_tree import nodes as _nt_nodes
 from .node_tree import executor as _nt_executor
+from .node_tree import templates as _nt_templates
 from .node_tree import panels as _nt_panels
 
 # Operators (layers & bake & run-pipeline)
@@ -76,6 +77,7 @@ if _needs_reload:
     _nt_project_layer = importlib.reload(_nt_project_layer)
     _nt_nodes = importlib.reload(_nt_nodes)
     _nt_executor = importlib.reload(_nt_executor)
+    _nt_templates = importlib.reload(_nt_templates)
     _nt_panels = importlib.reload(_nt_panels)
     _bl = importlib.reload(_bl)
     _layers = importlib.reload(_layers)
@@ -103,6 +105,8 @@ classes = (
     _layers.GENTEX_OT_LayerClear,
     _run_pipeline.GENTEX_OT_RunPipeline,
     _run_pipeline.GENTEX_OT_CancelPipeline,
+    _nt_templates.GENTEX_OT_AddTemplate,
+    _nt_templates.GENTEX_MT_template_menu,
     # Panels (3D View — layer stack only)
     _panels.GENTEX_UL_Layers,
     _panels.GENTEX_PT_main,
@@ -131,9 +135,11 @@ def register():
 
     _nt_tree.register_categories()
     _nt_panels.register_header()
+    _nt_templates.register_add_menu()
 
 
 def unregister():
+    _nt_templates.unregister_add_menu()
     _nt_panels.unregister_header()
     _nt_tree.unregister_categories()
 

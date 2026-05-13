@@ -3,9 +3,6 @@
 For each layer, sample the layer's image through its projected UV layer and
 write into the destination UV layer's space. Composite top-down: the topmost
 visible layer wins where its mask is 1.
-
-Equivalent to Modddif's mergeLayers: a per-pixel composite of all
-ProjectedTextureLayers into a single UvmappedTextureLayer.
 """
 
 import bpy

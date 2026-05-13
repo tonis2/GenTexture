@@ -111,27 +111,3 @@ def rebuild_layer_stack(obj):
         links.new(prev_color, principled.inputs["Base Color"])
 
     return mat
-
-
-def assign_material_to_faces(obj, material, face_indices=None):
-    """Ensure `material` is a slot on the object, return its index.
-
-    If face_indices is provided (in object mode it's mesh-loop face indices),
-    also set those faces' material_index to the new slot.
-    """
-    mat_index = -1
-    for i, slot in enumerate(obj.material_slots):
-        if slot.material == material:
-            mat_index = i
-            break
-    if mat_index == -1:
-        obj.data.materials.append(material)
-        mat_index = len(obj.material_slots) - 1
-
-    if face_indices is not None and obj.data:
-        polys = obj.data.polygons
-        for fi in face_indices:
-            if 0 <= fi < len(polys):
-                polys[fi].material_index = mat_index
-
-    return mat_index

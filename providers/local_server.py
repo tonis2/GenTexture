@@ -1,10 +1,9 @@
 """Self-hosted FLUX.1-dev server provider.
 
-Points at a long-running `gpu_rig/serve.py` instance (see fal_test/gpu_rig/)
-that keeps FLUX.1-dev + depth ControlNet + IP-Adapter resident in VRAM and
-exposes a single POST /generate endpoint. Use this when fal's hosted
-flux-general caps (IP-Adapter scale capped low, ControlNet timestep range
-clipped) are limiting reference-image fidelity.
+Points at a long-running HTTP server that keeps FLUX.1-dev + depth ControlNet
++ IP-Adapter resident in VRAM and exposes a single POST /generate endpoint.
+Use this when fal's hosted flux-general caps (IP-Adapter scale capped low,
+ControlNet timestep range clipped) are limiting reference-image fidelity.
 
 Architecture mirrors the fal providers: a stdin-driven worker subprocess
 does the HTTP I/O so Blender's main thread never blocks on a socket. The

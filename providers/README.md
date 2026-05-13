@@ -58,8 +58,10 @@ That's it. The addon will:
 - Show an **API Key** field in your provider's section in addon preferences
 - Pass `{api_key: "..."}` as `settings` when instantiating
 - Route text-to-image requests to `text2img()` and image-to-image to `img2img()`
-- Hide UI for capabilities you didn't declare (e.g. depth slider stays
-  inert, references panel shows a hint, etc.)
+- Skip request fields you can't handle: depth/references sockets on the
+  Generate node are always present, but if your provider doesn't declare
+  the matching capability they're ignored at dispatch time rather than
+  surfaced as errors
 
 ## API Reference
 
@@ -71,10 +73,9 @@ Capabilities are plain strings so plugins can introduce custom ones:
 |---|---|
 | `CAP_TEXT2IMG` | Plain prompt only |
 | `CAP_IMG2IMG` | Init image + prompt (no mask) |
-| `CAP_INPAINT` | Init image + mask + prompt. Without this, the addon falls back to **client-side compositing** with the mask the addon kept in memory. |
-| `CAP_DEPTH` | Provider can take a depth-map as conditioning |
-| `CAP_NORMAL` | Same, for normal maps |
-| `CAP_REFERENCE_IMAGES` | Provider takes additional reference images to condition style/theme. Modddif's `referenceImages[]`, Nano Banana's multi-image input. Without this, the panel shows a hint that references are ignored. |
+| `CAP_INPAINT` | Init image + mask + prompt. Without this, the addon's `generate()` dispatcher falls back to `img2img` and the Project Layer node composites the result against the captured mask client-side. |
+| `CAP_DEPTH_CONTROL` | Provider can take a depth-map as ControlNet conditioning. |
+| `CAP_REFERENCE_IMAGES` | Provider takes additional reference images to condition style/theme (e.g. Nano Banana's multi-image input, FLUX's IP-Adapter). Without this, references are ignored. |
 
 ### `GenerateRequest`
 
@@ -87,15 +88,18 @@ width: int = 1024
 height: int = 1024
 init_image: bytes | None
 mask_image: bytes | None
-depth_image: bytes | None
-normal_image: bytes | None
 reference_images: list[bytes]
-strength: float = 0.75       # 0..1, "denoising strength"
+depth_image: bytes | None    # white = close, black = far
+depth_scale: float = 0.6     # ControlNet conditioning strength
+strength: float = 0.75       # 0..1, "denoising strength" for img2img/inpaint
 seed: int | None = None      # random if None
 ```
 
-Convenience predicates: `req.is_text2img`, `req.is_img2img`, `req.is_inpaint`,
-`req.is_depth`, `req.is_normal`.
+Convenience predicates: `req.is_text2img`, `req.is_img2img`, `req.is_inpaint`.
+
+The depth map is supplied to providers that declare `CAP_DEPTH_CONTROL` and
+should be passed through a depth ControlNet so the generation respects the
+mesh's 3D structure, not just the silhouette.
 
 ### `GenerateResult`
 
@@ -142,12 +146,13 @@ Override only what you actually support; the default raises `UnsupportedRequestE
 def text2img(self, req: GenerateRequest) -> GenerateResult: ...
 def img2img(self, req: GenerateRequest) -> GenerateResult: ...
 def inpaint(self, req: GenerateRequest) -> GenerateResult: ...
-def depth(self, req: GenerateRequest) -> GenerateResult: ...
-def normal(self, req: GenerateRequest) -> GenerateResult: ...
 ```
 
-The default `generate()` dispatches to the right one based on what's set on
-the request. Override `generate()` only if you need cross-feature logic.
+The default `generate()` dispatches based on what's set on the request
+(inpaint > img2img > text2img). Depth, normal, and reference images are not
+separate dispatch targets — they're additional fields the provider's own
+`text2img`/`img2img`/`inpaint` implementation reads from the request. Override
+`generate()` only if you need cross-feature logic.
 
 ### Subprocess HTTP helper
 
@@ -189,16 +194,18 @@ Raise the most specific class:
 - `UnsupportedRequestError` — capability mismatch
 - `ProviderError` — anything else
 
-The addon surfaces these in the panel as `Error: ...`.
+The addon surfaces these in the Node Editor header (and `scene.gentex_info`)
+as `Error in <node>: ...`, and halts the pipeline.
 
 ## Multi-model providers
 
 Two patterns — pick whichever reads cleaner.
 
-**Two classes** (current fal.py): `FalFluxProvider` and `FalNanoBananaProvider`
-are siblings sharing a `_FalBase` mixin. Each registers separately, has its
-own capabilities, and shows up in the provider dropdown. Best when the models
-have meaningfully different capabilities.
+**Multiple classes** (current fal.py): `FalFluxProvider`,
+`FalFluxGeneralProvider`, and `FalNanoBananaProvider` are siblings sharing a
+`_FalBase` mixin. Each registers separately, has its own capabilities, and
+shows up in the provider dropdown. Best when the models have meaningfully
+different capabilities or endpoint shapes.
 
 **One class with an enum field**: declare `model` as an `enum` preference
 field, branch on `self.settings["model"]` in `generate()`. Best when the

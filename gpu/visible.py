@@ -11,9 +11,9 @@ def render_visible_image(area, region_width: int, region_height: int,
                          force_matcap: bool = True) -> np.ndarray:
     """Render the current 3D viewport via OpenGL with overlays disabled.
 
-    This produces the "visible image" in Modddif's sense: what the user is seeing
-    of the textured mesh from the active camera. Used as init_image for img2img
-    so generations stay consistent with already-textured layers.
+    Produces the "visible image" — what the user is seeing of the textured
+    mesh from the active camera. Used as ``init_image`` for img2img so
+    generations stay consistent with already-textured layers.
 
     Args:
         area: a VIEW_3D area
@@ -47,10 +47,9 @@ def render_visible_image(area, region_width: int, region_height: int,
     # a depth-anything-style shaded surface to work from. Material Preview /
     # Rendered shading already carries rich detail, so we leave them alone.
     #
-    # We also force a black viewport background during the render. fal's
-    # flux-general inpaint+depth recipe was validated against tight matcap-on-
-    # black inputs in `fal_test/`; anything else (theme grey, gradient sky,
-    # world-coloured BG) leaks into the result and confuses the depth signal.
+    # We also force a black viewport background during the render — theme
+    # grey, gradient sky, or world-coloured backgrounds leak into the result
+    # and confuse FLUX-general's depth+inpaint recipe.
     shading_restore = None
     bg_restore = None
     if force_matcap:

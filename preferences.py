@@ -31,13 +31,19 @@ ADDON_PKG = __package__
 # Field-to-property translation
 # ---------------------------------------------------------------------------
 #
-# History: there used to be an `update=` callback on every preference property
-# that immediately ran `bpy.ops.wm.save_userpref()`. It silently wiped saved
-# API keys: during addon reload (hot-reload or disable/enable cycles), Blender
-# re-declares properties at their `default=""` *before* restoring the persisted
-# value, and any update-callback firing on that transient default would write
-# an empty key over the real one. Removed — relies on Blender's
-# "Auto-Save Preferences" (default-on) plus the explicit Save button below.
+# Notes on persistence:
+#   - Two earlier bugs are recorded here so we don't reintroduce them.
+#   1) An `update=` callback that ran `wm.save_userpref()` on every change
+#      silently wiped API keys: during addon (re)registration, properties
+#      are briefly held at their `default=""` before Blender restores the
+#      persisted value, and the callback firing on that transient default
+#      would overwrite the on-disk value with empty. Don't auto-save in an
+#      update callback.
+#   2) Blender deliberately does NOT serialize `subtype='PASSWORD'` string
+#      properties to userpref.blend — they're session-only secrets, so API
+#      keys would disappear every restart even after a manual save. Hence
+#      api_key uses plain StringProperty (no PASSWORD subtype). Visible in
+#      the prefs panel, but actually persists.
 
 def _to_bpy_prop(field: PreferenceField):
     name = field.label
@@ -46,8 +52,11 @@ def _to_bpy_prop(field: PreferenceField):
         return bpy.props.StringProperty(name=name, description=desc,
                                          default=str(field.default or ""))
     if field.kind == "password":
+        # See note above: PASSWORD subtype skips userpref serialization, so
+        # we use a plain StringProperty. The field still functions as a key
+        # store — it's just not masked in the UI.
         return bpy.props.StringProperty(name=name, description=desc,
-                                         default="", subtype='PASSWORD')
+                                         default="")
     if field.kind == "enum":
         return bpy.props.EnumProperty(name=name, description=desc,
                                        items=field.items or [],

@@ -3,8 +3,8 @@ the mesh as a new projected layer.
 
 Requires a Viewport Capture node upstream (anywhere in the chain) — it reads
 `ctx.captured_per_obj` for the per-mesh UV name + face indices, and
-`ctx.captured_mask`/`captured_visible` for local-mask composite fallback when
-the provider lacked native inpaint.
+`ctx.captured_mask` / `captured_visible` for the client-side mask composite
+that keeps pixels outside the selection unchanged.
 """
 
 import bpy
@@ -75,19 +75,20 @@ class GenTexNodeProjectLayer(GenTexPipelineNodeBase, bpy.types.Node):
                 "Viewport Capture node into this chain."
             )
 
+        scene = bpy.context.scene
+
+        scene.gentex_info = f"{self.name}: decoding image..."
         ai_image = load_image_bytes(bytes(png))
         captured_w, captured_h = ctx.captured_size
         ai_h, ai_w = ai_image.shape[:2]
         if (ai_h, ai_w) != (captured_h, captured_w):
             ai_image = _bilinear_resize(ai_image, captured_w, captured_h)
 
-        # Force pixels outside the selection mask back to the captured visible
-        # image. If the provider already inpainted exactly, this is a no-op;
-        # if it ignored the mask (Gemini etc.), this preserves the surroundings.
         if ctx.captured_visible is not None:
             m = ctx.captured_mask[..., None]
             ai_image = m * ai_image[..., :4] + (1.0 - m) * ctx.captured_visible[..., :4]
 
+        scene.gentex_info = f"{self.name}: creating layer images..."
         first_obj = ctx.captured_per_obj[0][0]
         layer_index = len(first_obj.gentex_layers)
         seed = getattr(ctx.last_result, "seed", 0) if ctx.last_result else 0
@@ -99,6 +100,7 @@ class GenTexNodeProjectLayer(GenTexPipelineNodeBase, bpy.types.Node):
         )
         mask_img = np_to_bpy(mask_rgba, base_name + " Mask")
 
+        scene.gentex_info = f"{self.name}: building material..."
         for obj, uv_name, face_indices in ctx.captured_per_obj:
             layer = obj.gentex_layers.add()
             layer.name = base_name
@@ -112,10 +114,25 @@ class GenTexNodeProjectLayer(GenTexPipelineNodeBase, bpy.types.Node):
             obj.gentex_active_layer_index = len(obj.gentex_layers) - 1
             rebuild_layer_stack(obj)
 
-        if self.auto_bake:
-            for obj, _, _ in ctx.captured_per_obj:
-                if obj.data.uv_layers.active is None:
-                    continue
+        for window in bpy.context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
+
+        if not self.auto_bake:
+            return
+
+        # Defer the bake — it's the heaviest step (Cycles render). Letting the
+        # executor advance past this node first means status messages update,
+        # the layer-stack material paints on the mesh, and the UI redraws BEFORE
+        # the multi-second bake kicks in. Use a timer to schedule it on the
+        # main thread one tick later.
+        objs_to_bake = [obj for obj, _, _ in ctx.captured_per_obj
+                        if obj.data.uv_layers.active is not None]
+
+        def _bake():
+            for obj in objs_to_bake:
+                bpy.context.scene.gentex_info = f"Baking {obj.name}..."
                 prev_active = bpy.context.view_layer.objects.active
                 bpy.context.view_layer.objects.active = obj
                 try:
@@ -125,8 +142,7 @@ class GenTexNodeProjectLayer(GenTexPipelineNodeBase, bpy.types.Node):
                     print(f"[GenTex] auto-bake failed: {bake_err}")
                 finally:
                     bpy.context.view_layer.objects.active = prev_active
+            bpy.context.scene.gentex_info = ""
+            return None
 
-        for window in bpy.context.window_manager.windows:
-            for area in window.screen.areas:
-                if area.type == 'VIEW_3D':
-                    area.tag_redraw()
+        bpy.app.timers.register(_bake, first_interval=0.1)
