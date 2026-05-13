@@ -33,9 +33,8 @@ from typing import Iterable
 CAP_TEXT2IMG = "text2img"           # plain prompt -> image
 CAP_IMG2IMG = "img2img"             # init image + prompt -> image
 CAP_INPAINT = "inpaint"             # init + mask + prompt -> image (true mask)
-CAP_DEPTH = "depth"                 # depth map conditioning
-CAP_NORMAL = "normal"               # normal map conditioning
 CAP_REFERENCE_IMAGES = "reference_images"   # extra style reference images
+CAP_DEPTH_CONTROL = "depth_control"  # provider can accept a depth ControlNet map
 
 
 # ---------------------------------------------------------------------------
@@ -50,8 +49,6 @@ class GenerateRequest:
     `generate()` dispatches in this priority:
 
         inpaint   (init_image + mask_image)
-        normal    (normal_image)
-        depth     (depth_image)
         img2img   (init_image)
         text2img  (none)
     """
@@ -62,9 +59,12 @@ class GenerateRequest:
     height: int = 1024
     init_image: bytes | None = None
     mask_image: bytes | None = None
-    depth_image: bytes | None = None
-    normal_image: bytes | None = None
     reference_images: list[bytes] = field(default_factory=list)
+    # PNG depth map (white = close, black = far). Providers that advertise
+    # `CAP_DEPTH_CONTROL` will pass this through a depth ControlNet so generated
+    # content respects the mesh's 3D structure instead of just the silhouette.
+    depth_image: bytes | None = None
+    depth_scale: float = 0.6
     strength: float = 0.75
     seed: int | None = None
 
@@ -79,18 +79,8 @@ class GenerateRequest:
         return self.init_image is not None and self.mask_image is None
 
     @property
-    def is_depth(self) -> bool:
-        return self.depth_image is not None
-
-    @property
-    def is_normal(self) -> bool:
-        return self.normal_image is not None
-
-    @property
     def is_text2img(self) -> bool:
-        return all(x is None for x in (
-            self.init_image, self.mask_image, self.depth_image, self.normal_image,
-        ))
+        return self.init_image is None and self.mask_image is None
 
 
 @dataclass
@@ -205,16 +195,6 @@ class Provider(ABC):
             f"{self.label or self.id} does not support inpainting"
         )
 
-    def depth(self, request: GenerateRequest) -> GenerateResult:
-        raise UnsupportedRequestError(
-            f"{self.label or self.id} does not support depth conditioning"
-        )
-
-    def normal(self, request: GenerateRequest) -> GenerateResult:
-        raise UnsupportedRequestError(
-            f"{self.label or self.id} does not support normal-map conditioning"
-        )
-
     # ---- top-level entry point --------------------------------------------
 
     def generate(self, request: GenerateRequest) -> GenerateResult:
@@ -229,10 +209,6 @@ class Provider(ABC):
             # Fall back to img2img — caller is responsible for any
             # client-side mask compositing.
             return self.img2img(request)
-        if request.is_normal:
-            return self.normal(request)
-        if request.is_depth:
-            return self.depth(request)
         if request.is_img2img:
             return self.img2img(request)
         return self.text2img(request)

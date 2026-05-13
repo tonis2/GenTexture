@@ -6,7 +6,7 @@ import numpy as np
 
 
 def render_selection_mask(width: int, height: int, view_matrix, projection_matrix,
-                          objects=None) -> np.ndarray:
+                          objects=None, all_faces: bool = False) -> np.ndarray:
     """Render selected faces of edit-mode meshes as a white-on-black mask.
 
     Selected faces are rasterized in white through the given camera; everything
@@ -17,6 +17,10 @@ def render_selection_mask(width: int, height: int, view_matrix, projection_matri
         width, height: output size
         view_matrix, projection_matrix: typically region_3d.view_matrix / window_matrix
         objects: list of mesh objects in edit mode. If None, uses bpy.context's edit objects.
+        all_faces: when True, treat every face as "selected" — useful for the
+            whole-mesh mode of the projection operator, where the user hasn't
+            highlighted faces but the mask still needs to mark every visible
+            triangle. Self-occlusion is preserved via the depth test.
 
     Returns:
         (H, W) float32 array, 0..1
@@ -47,7 +51,7 @@ def render_selection_mask(width: int, height: int, view_matrix, projection_matri
                 continue
             for i in range(1, len(verts) - 1):
                 tri = (verts[0], verts[i], verts[i + 1])
-                if f.select:
+                if all_faces or f.select:
                     sel_idx.append(tri)
                 else:
                     unsel_idx.append(tri)

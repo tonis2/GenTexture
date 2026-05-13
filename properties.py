@@ -16,9 +16,8 @@ def _layer_changed(self, context):
     material isn't visible — so we also re-run the bake so toggles like
     `visible` and `opacity` actually show up in the viewport.
     """
-    # Lazy import to avoid a circular import at module load.
     from .utils.material import rebuild_layer_stack
-    obj = self.id_data  # the Object that owns this PropertyGroup
+    obj = self.id_data
     if obj is None:
         return
     rebuild_layer_stack(obj)
@@ -45,12 +44,7 @@ def _layer_changed(self, context):
 
 
 class GenTexLayer(bpy.types.PropertyGroup):
-    """A single projected texture layer.
-
-    Mirrors Modddif's ProjectedTextureLayer: an AI-generated image projected
-    through a frozen camera/UV snapshot, optionally masked by a per-layer mask
-    image so the layer only contributes where it was generated.
-    """
+    """A single projected texture layer."""
 
     name: bpy.props.StringProperty(name="Name", default="Layer")
 
@@ -90,25 +84,8 @@ class GenTexLayer(bpy.types.PropertyGroup):
     seed: bpy.props.IntProperty(name="Seed", default=0)
 
 
-class GenTexReferenceImage(bpy.types.PropertyGroup):
-    """A reference image fed alongside the prompt to keep style/theme consistent.
-
-    Mirrors Modddif's `referenceImages[]` field on the worker job — a list of
-    extra images the model conditions on (e.g. an existing layer's color, a
-    mood-board picture). Most useful with Nano Banana (Gemini 2.5 Flash Image),
-    which natively accepts multiple input images.
-    """
-
-    image: bpy.props.PointerProperty(
-        name="Image",
-        type=bpy.types.Image,
-        description="Reference image. Pick any Blender image, including a layer's color image",
-    )
-
-
 def register():
     bpy.utils.register_class(GenTexLayer)
-    bpy.utils.register_class(GenTexReferenceImage)
     bpy.types.Object.gentex_layers = bpy.props.CollectionProperty(type=GenTexLayer)
     bpy.types.Object.gentex_active_layer_index = bpy.props.IntProperty(default=-1)
     bpy.types.Object.gentex_baked_image = bpy.props.PointerProperty(
@@ -127,8 +104,6 @@ def register():
         default=False,
         update=_use_baked_changed,
     )
-    bpy.types.Scene.gentex_references = bpy.props.CollectionProperty(type=GenTexReferenceImage)
-    bpy.types.Scene.gentex_active_reference_index = bpy.props.IntProperty(default=-1)
 
 
 def unregister():
@@ -137,7 +112,4 @@ def unregister():
     del bpy.types.Object.gentex_baked_image
     del bpy.types.Object.gentex_baked_uv
     del bpy.types.Object.gentex_use_baked
-    del bpy.types.Scene.gentex_references
-    del bpy.types.Scene.gentex_active_reference_index
-    bpy.utils.unregister_class(GenTexReferenceImage)
     bpy.utils.unregister_class(GenTexLayer)

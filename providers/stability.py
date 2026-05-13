@@ -3,7 +3,6 @@
 Uses the v2beta Stable Image API:
 
   * generate/sd3                  - text2img + img2img (`mode=image-to-image`)
-  * control/structure             - depth/normal-style structural conditioning
   * edit/inpaint                  - mask-based inpainting
 """
 
@@ -14,7 +13,7 @@ import base64
 from .api import (
     Provider, GenerateRequest, GenerateResult, PreferenceField,
     register_provider,
-    CAP_TEXT2IMG, CAP_IMG2IMG, CAP_INPAINT, CAP_DEPTH, CAP_NORMAL,
+    CAP_TEXT2IMG, CAP_IMG2IMG, CAP_INPAINT,
 )
 from ._http import run_subprocess
 
@@ -87,7 +86,7 @@ class StabilityProvider(Provider):
 
     @classmethod
     def capabilities(cls) -> set[str]:
-        return {CAP_TEXT2IMG, CAP_IMG2IMG, CAP_INPAINT, CAP_DEPTH, CAP_NORMAL}
+        return {CAP_TEXT2IMG, CAP_IMG2IMG, CAP_INPAINT}
 
     @classmethod
     def preference_fields(cls) -> list[PreferenceField]:
@@ -142,27 +141,7 @@ class StabilityProvider(Provider):
             fields["seed"] = str(request.seed)
         return self._post(f"{API_BASE}/v2beta/stable-image/edit/inpaint", fields)
 
-    def depth(self, request: GenerateRequest) -> GenerateResult:
-        return self._control_structure(request, request.depth_image)
-
-    def normal(self, request: GenerateRequest) -> GenerateResult:
-        # Stability has no dedicated normal endpoint; reuse structure control.
-        return self._control_structure(request, request.normal_image)
-
     # ---------- internals ---------------------------------------------------
-
-    def _control_structure(self, request: GenerateRequest, control_png: bytes) -> GenerateResult:
-        fields = {
-            "prompt": request.prompt,
-            "image": _file_field("control.png", control_png, "image/png"),
-            "control_strength": str(request.strength),
-            "output_format": "png",
-        }
-        if request.negative_prompt:
-            fields["negative_prompt"] = request.negative_prompt
-        if request.seed is not None:
-            fields["seed"] = str(request.seed)
-        return self._post(f"{API_BASE}/v2beta/stable-image/control/structure", fields)
 
     def _post(self, url: str, fields: dict) -> GenerateResult:
         api_key = self.settings.get("api_key", "")

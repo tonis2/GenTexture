@@ -97,7 +97,6 @@ def _rasterize_tri(out: np.ndarray, src_img: np.ndarray,
 
     Returns number of pixels written.
     """
-    # Destination pixel coordinates (bottom-up: y = v * H)
     px = d[:, 0] * dw
     py = d[:, 1] * dh
 
@@ -130,10 +129,10 @@ def _rasterize_tri(out: np.ndarray, src_img: np.ndarray,
     u_src = l1 * s[0, 0] + l2 * s[1, 0] + l3 * s[2, 0]
     v_src = l1 * s[0, 1] + l2 * s[1, 1] + l3 * s[2, 1]
 
-    # Bilinear sample source (bottom-up storage). Nearest-neighbour produced
-    # visible blockiness wherever the dest face was larger than the src face's
-    # screen-space footprint (i.e. faces near the silhouette of the projection
-    # camera, where one screen pixel maps to several dest pixels).
+    # Bilinear sample. Nearest-neighbour produced visible blockiness wherever
+    # the dest face was larger than the src face's screen-space footprint
+    # (i.e. faces near the silhouette of the projection camera, where one
+    # screen pixel maps to several dest pixels).
     sx_f = np.clip(u_src * sw - 0.5, 0, sw - 1)
     sy_f = np.clip(v_src * sh - 0.5, 0, sh - 1)
     x0i = np.floor(sx_f).astype(np.int32)

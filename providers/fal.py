@@ -23,8 +23,8 @@ from .api import (
     Provider, GenerateRequest, GenerateResult, PreferenceField,
     AuthenticationError,
     register_provider,
-    CAP_TEXT2IMG, CAP_IMG2IMG, CAP_INPAINT, CAP_DEPTH, CAP_NORMAL,
-    CAP_REFERENCE_IMAGES,
+    CAP_TEXT2IMG, CAP_IMG2IMG, CAP_INPAINT,
+    CAP_REFERENCE_IMAGES, CAP_DEPTH_CONTROL,
 )
 from ._http import run_subprocess
 
@@ -219,7 +219,7 @@ class FalFluxProvider(_FalBase):
 
     @classmethod
     def capabilities(cls) -> set[str]:
-        return {CAP_TEXT2IMG, CAP_IMG2IMG, CAP_INPAINT, CAP_DEPTH, CAP_NORMAL}
+        return {CAP_TEXT2IMG, CAP_IMG2IMG, CAP_INPAINT}
 
     def text2img(self, request: GenerateRequest) -> GenerateResult:
         body = {
@@ -256,56 +256,35 @@ class FalFluxProvider(_FalBase):
             body["seed"] = request.seed
         return self._run("fal-ai/flux-pro/v1/fill", body)
 
-    def depth(self, request: GenerateRequest) -> GenerateResult:
-        body = self._easycontrol_body(request, request.depth_image)
-        return self._run("fal-ai/flux-general", body)
-
-    def normal(self, request: GenerateRequest) -> GenerateResult:
-        body = self._easycontrol_body(request, request.normal_image)
-        return self._run("fal-ai/flux-general", body)
-
-    def _easycontrol_body(self, request: GenerateRequest, control_png: bytes) -> dict:
-        body = {
-            "prompt": request.prompt,
-            "easycontrols": [{
-                "control_method_url": "depth",
-                "image_url": _to_data_uri(control_png),
-                "image_control_type": "spatial",
-                "scale": request.strength,
-            }],
-            "num_images": 1,
-            "output_format": "png",
-            "image_size": {"width": request.width, "height": request.height},
-        }
-        if request.seed is not None:
-            body["seed"] = request.seed
-        if request.init_image is not None:
-            body["image_url"] = _to_data_uri(request.init_image)
-        return body
-
 
 # ---------------------------------------------------------------------------
-# Nano Banana (Gemini 2.5 Flash Image)
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# FLUX General — inpaint + IP-Adapter (style references) + ControlNet
+# FLUX General — inpaint + IP-Adapter (style references)
 # ---------------------------------------------------------------------------
 
 # Default IP-Adapter checkpoints used when `reference_images` are supplied.
 # These ship with fal's flux-general endpoint and don't require extra config.
 _FLUX_IP_ADAPTER_PATH = "XLabs-AI/flux-ip-adapter"
+# Without `weight_name`, fal's loader can't pick a file out of the repo and
+# 422s with "Failed to download ip-adapter weights: 'NoneType' object has no
+# attribute 'split'" — it's literally splitting a None URL.
+_FLUX_IP_ADAPTER_WEIGHT = "ip_adapter.safetensors"
 _FLUX_IP_ADAPTER_ENCODER = "openai/clip-vit-large-patch14"
+
+# Depth ControlNet checkpoint used when `depth_image` is supplied. Shakker-Labs'
+# FLUX.1-dev depth ControlNet is the de-facto choice — it ships with fal and
+# expects depth-anything-v2-style maps (white = near, black = far), which is
+# the convention our `render_depth_map` produces.
+_FLUX_DEPTH_CONTROLNET_PATH = "Shakker-Labs/FLUX.1-dev-ControlNet-Depth"
 
 
 @register_provider
 class FalFluxGeneralProvider(_FalBase):
     """fal's `flux-general` endpoint — the multi-modal FLUX pipeline.
 
-    The single endpoint accepts: init image, mask, ControlNet conditioning
-    (depth/normal), and a list of IP-Adapter references for style. This is the
-    one provider that gives you both the inpaint pixel-preservation contract
-    (so screen-space projection lines up) AND multi-image style references.
+    Accepts init image, mask, and a list of IP-Adapter references for style.
+    This is the one provider that gives you both the inpaint pixel-preservation
+    contract (so screen-space projection lines up) AND multi-image style
+    references in a single call.
     """
 
     id = "fal_flux_general"
@@ -313,10 +292,8 @@ class FalFluxGeneralProvider(_FalBase):
 
     @classmethod
     def capabilities(cls) -> set[str]:
-        return {
-            CAP_TEXT2IMG, CAP_IMG2IMG, CAP_INPAINT,
-            CAP_REFERENCE_IMAGES, CAP_DEPTH, CAP_NORMAL,
-        }
+        return {CAP_TEXT2IMG, CAP_IMG2IMG, CAP_INPAINT,
+                CAP_REFERENCE_IMAGES, CAP_DEPTH_CONTROL}
 
     def generate(self, request: GenerateRequest) -> GenerateResult:
         # All capabilities map to the same endpoint — it's the fields on the
@@ -341,34 +318,34 @@ class FalFluxGeneralProvider(_FalBase):
         if request.mask_image is not None:
             body["mask_url"] = _to_data_uri(request.mask_image)
 
-        easycontrols = []
-        if request.depth_image is not None:
-            easycontrols.append({
-                "control_method_url": "depth",
-                "image_url": _to_data_uri(request.depth_image),
-                "image_control_type": "spatial",
-                "scale": request.strength,
-            })
-        if request.normal_image is not None:
-            easycontrols.append({
-                "control_method_url": "normal",
-                "image_url": _to_data_uri(request.normal_image),
-                "image_control_type": "spatial",
-                "scale": request.strength,
-            })
-        if easycontrols:
-            body["easycontrols"] = easycontrols
-
         if request.reference_images:
-            # Spread weight evenly across references; capped at 1.0 total so
-            # the prompt still drives the result instead of being overridden.
-            per_ref = min(1.0, 1.0 / len(request.reference_images))
+            # Spread weight evenly across references and cap at 0.6 per ref.
+            # Higher scales (≥0.8) overpower the depth ControlNet and FLUX
+            # starts duplicating reference features — e.g. two heads/poms on
+            # a single mesh. The fal_test/ bench (cat_ref_scale_* configs)
+            # confirmed 0.5–0.6 is the sweet spot when depth is also on.
+            per_ref = min(0.6, 1.0 / len(request.reference_images))
             body["ip_adapters"] = [{
-                "ip_adapter_path": _FLUX_IP_ADAPTER_PATH,
+                "path": _FLUX_IP_ADAPTER_PATH,
+                "weight_name": _FLUX_IP_ADAPTER_WEIGHT,
                 "image_encoder_path": _FLUX_IP_ADAPTER_ENCODER,
-                "ip_adapter_image_url": _to_data_uri(ref),
+                "image_url": _to_data_uri(ref),
                 "scale": per_ref,
             } for ref in request.reference_images]
+
+        if request.depth_image is not None:
+            # Depth ControlNet — this is what makes the generated content
+            # actually wrap the mesh's 3D structure instead of being a flat
+            # image inside the silhouette. Apply from the start of denoising
+            # but release before the final steps so high-frequency surface
+            # detail (specified by the prompt) isn't clipped by the depth.
+            body["controlnets"] = [{
+                "path": _FLUX_DEPTH_CONTROLNET_PATH,
+                "control_image_url": _to_data_uri(request.depth_image),
+                "conditioning_scale": request.depth_scale,
+                "start_percentage": 0.0,
+                "end_percentage": 0.8,
+            }]
 
         return self._run("fal-ai/flux-general", body)
 

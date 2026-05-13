@@ -19,6 +19,7 @@ from .providers import PROVIDERS, PreferenceField
 # build the AddonPreferences class.
 from .providers import stability as _stability  # noqa: F401
 from .providers import fal as _fal  # noqa: F401
+from .providers import gemini_direct as _gemini_direct  # noqa: F401
 
 
 # Full package name. Same string for legacy addons and extensions; used as
@@ -29,51 +30,37 @@ ADDON_PKG = __package__
 # ---------------------------------------------------------------------------
 # Field-to-property translation
 # ---------------------------------------------------------------------------
-
-def _save_prefs_on_change(self, context):
-    """Persist user preferences immediately when a field changes.
-
-    Without this, API keys typed into the addon prefs only survive across
-    Blender restarts if the user has "Auto Save Preferences" enabled or clicks
-    Save manually. The save call is safe — it's the same operation Blender
-    runs on quit when auto-save is on.
-    """
-    try:
-        bpy.ops.wm.save_userpref()
-    except Exception:
-        # Save can transiently fail (e.g. file lock). The next change retries.
-        pass
-
+#
+# History: there used to be an `update=` callback on every preference property
+# that immediately ran `bpy.ops.wm.save_userpref()`. It silently wiped saved
+# API keys: during addon reload (hot-reload or disable/enable cycles), Blender
+# re-declares properties at their `default=""` *before* restoring the persisted
+# value, and any update-callback firing on that transient default would write
+# an empty key over the real one. Removed — relies on Blender's
+# "Auto-Save Preferences" (default-on) plus the explicit Save button below.
 
 def _to_bpy_prop(field: PreferenceField):
     name = field.label
     desc = field.description
-    upd = _save_prefs_on_change
     if field.kind == "string":
         return bpy.props.StringProperty(name=name, description=desc,
-                                         default=str(field.default or ""),
-                                         update=upd)
+                                         default=str(field.default or ""))
     if field.kind == "password":
         return bpy.props.StringProperty(name=name, description=desc,
-                                         default="", subtype='PASSWORD',
-                                         update=upd)
+                                         default="", subtype='PASSWORD')
     if field.kind == "enum":
         return bpy.props.EnumProperty(name=name, description=desc,
                                        items=field.items or [],
-                                       default=field.default,
-                                       update=upd)
+                                       default=field.default)
     if field.kind == "int":
         return bpy.props.IntProperty(name=name, description=desc,
-                                      default=int(field.default or 0),
-                                      update=upd)
+                                      default=int(field.default or 0))
     if field.kind == "float":
         return bpy.props.FloatProperty(name=name, description=desc,
-                                        default=float(field.default or 0.0),
-                                        update=upd)
+                                        default=float(field.default or 0.0))
     if field.kind == "bool":
         return bpy.props.BoolProperty(name=name, description=desc,
-                                       default=bool(field.default),
-                                       update=upd)
+                                       default=bool(field.default))
     raise ValueError(f"Unknown preference field kind: {field.kind}")
 
 
@@ -89,8 +76,6 @@ def _draw(self, context):
     layout = self.layout
     layout.use_property_split = True
     layout.use_property_decorate = False
-
-    layout.prop(self, "provider")
 
     for pid, pcls in PROVIDERS.items():
         fields = pcls.preference_fields()
@@ -120,23 +105,14 @@ def _get_api_key(self, provider_id: str) -> str:
     return getattr(self, _attr_name(provider_id, "api_key"), "")
 
 
-def _provider_items(self, context):
-    return [(pid, cls.label or pid, cls.__doc__ or "") for pid, cls in PROVIDERS.items()]
-
-
 # ---------------------------------------------------------------------------
 # Build the class dynamically
 # ---------------------------------------------------------------------------
 
 def _build_preferences_class():
-    annotations: dict = {
-        "provider": bpy.props.EnumProperty(
-            name="Provider",
-            description="Active image generation provider",
-            items=_provider_items,
-            update=_save_prefs_on_change,
-        ),
-    }
+    # Provider selection is now per-Generate-node (see node_tree/nodes/generate.py),
+    # so the addon-prefs no longer needs a global provider enum.
+    annotations: dict = {}
 
     for pid, pcls in PROVIDERS.items():
         for f in pcls.preference_fields():

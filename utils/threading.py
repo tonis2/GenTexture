@@ -64,9 +64,14 @@ def run_async(
         # writing here can race them and leave a stale "IN_PROGRESS (Ns)"
         # message behind if on_complete throws before clearing info.
         if thread.is_alive():
+            # Each provider writes to its own temp status file. Only one job
+            # is in flight at a time, so checking both and taking the first
+            # non-empty one is unambiguous.
             try:
-                from ..providers.fal import get_status
-                status = get_status()
+                from ..providers.fal import get_status as _fal_status
+                from ..providers.local_server import get_status as _local_status
+                from ..providers.gemini_direct import get_status as _gemini_status
+                status = _local_status() or _fal_status() or _gemini_status()
                 if status:
                     bpy.context.scene.gentex_info = status
             except Exception:

@@ -23,7 +23,6 @@ from .api import (  # noqa: F401
     CAP_TEXT2IMG,
     CAP_IMG2IMG,
     CAP_INPAINT,
-    CAP_DEPTH,
-    CAP_NORMAL,
     CAP_REFERENCE_IMAGES,
+    CAP_DEPTH_CONTROL,
 )
