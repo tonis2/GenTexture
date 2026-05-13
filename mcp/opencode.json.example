@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "gentex": {
+      "type": "local",
+      "command": [
+        "python3",
+        "/abs/path/to/GenTexture/mcp/gentex-mcp-server.py"
+      ],
+      "environment": {
+        "BLENDER_HOST": "127.0.0.1",
+        "BLENDER_PORT": "9877"
+      },
+      "enabled": true
+    }
+  }
+}

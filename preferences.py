@@ -86,6 +86,27 @@ def _draw(self, context):
     layout.use_property_split = True
     layout.use_property_decorate = False
 
+    # MCP server section
+    from . import mcp_server
+    box = layout.box()
+    box.label(text="MCP Server", icon='NETWORK_DRIVE')
+    box.prop(self, "mcp_enabled")
+    row = box.row()
+    row.prop(self, "mcp_host")
+    row.prop(self, "mcp_port")
+    status_row = box.row()
+    if mcp_server.is_running():
+        host, port = mcp_server.get_address()
+        status_row.label(text=f"Running on {host}:{port}", icon='CHECKMARK')
+        status_row.operator("gentex.mcp_stop", text="Stop", icon='PAUSE')
+    else:
+        err = mcp_server.get_last_error()
+        if err:
+            status_row.label(text=err, icon='ERROR')
+        else:
+            status_row.label(text="Stopped", icon='RADIOBUT_OFF')
+        status_row.operator("gentex.mcp_start", text="Start", icon='PLAY')
+
     for pid, pcls in PROVIDERS.items():
         fields = pcls.preference_fields()
         if not fields:
@@ -121,7 +142,31 @@ def _get_api_key(self, provider_id: str) -> str:
 def _build_preferences_class():
     # Provider selection is now per-Generate-node (see node_tree/nodes/generate.py),
     # so the addon-prefs no longer needs a global provider enum.
-    annotations: dict = {}
+    annotations: dict = {
+        # MCP server (TCP JSON command dispatcher hosted inside Blender).
+        # Off by default — flip it on, hit Start, and an external Claude Code /
+        # OpenCode session can drive the generation APIs through a stdio
+        # bridge script (see mcp/gentex-mcp-server.py).
+        "mcp_enabled": bpy.props.BoolProperty(
+            name="Enable MCP Server",
+            description=(
+                "Run a TCP command server inside Blender so external AI "
+                "agents (Claude Code, OpenCode, ...) can call GenTexture's "
+                "image-generation APIs via MCP"
+            ),
+            default=False,
+        ),
+        "mcp_host": bpy.props.StringProperty(
+            name="Host",
+            description="Bind address. Keep at 127.0.0.1 unless you know what you're doing",
+            default="127.0.0.1",
+        ),
+        "mcp_port": bpy.props.IntProperty(
+            name="Port",
+            description="TCP port the in-Blender MCP server listens on",
+            default=9877, min=1024, max=65535,
+        ),
+    }
 
     for pid, pcls in PROVIDERS.items():
         for f in pcls.preference_fields():

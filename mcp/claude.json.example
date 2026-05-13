@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "gentex": {
+      "command": "python3",
+      "args": [
+        "/abs/path/to/GenTexture/mcp/gentex-mcp-server.py"
+      ],
+      "env": {
+        "BLENDER_HOST": "127.0.0.1",
+        "BLENDER_PORT": "9877"
+      }
+    }
+  }
+}
