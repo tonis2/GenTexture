@@ -32,66 +32,76 @@ def render_visible_image(area, region_width: int, region_height: int,
     render_filepath = scene.render.filepath
     file_format = scene.render.image_settings.file_format
 
-    scene.render.resolution_x = region_width
-    scene.render.resolution_y = region_height
-
-    hidden_spaces = []
-    for sp in area.spaces:
-        if sp.type == 'VIEW_3D' and sp.overlay.show_overlays:
-            hidden_spaces.append(sp)
-            sp.overlay.show_overlays = False
-
-    # Surface-shading restore record. When the viewport is in Solid mode with
-    # FLAT/STUDIO/MATCAP=FLAT, the AI's init image is a uniformly-coloured
-    # silhouette with no normal cue. Flipping briefly to MATCAP gives the model
-    # a depth-anything-style shaded surface to work from. Material Preview /
-    # Rendered shading already carries rich detail, so we leave them alone.
-    #
-    # We also force a black viewport background during the render — theme
-    # grey, gradient sky, or world-coloured backgrounds leak into the result
-    # and confuse FLUX-general's depth+inpaint recipe.
+    # All viewport/scene/object state mutations must live inside the try so the
+    # finally can restore them. Previously the matcap flip, per-object wire
+    # tweak and mode_set lived above the try, so any raise (or a
+    # mode_set poll failure) would leak `show_overlays=False` and leave the
+    # user without grid, gizmos, outline-selected, etc. Initialise restore
+    # records up front and mutate inside try.
+    hidden_spaces: list = []
     shading_restore = None
     bg_restore = None
-    if force_matcap:
-        for sp in area.spaces:
-            if sp.type != 'VIEW_3D':
-                continue
-            sh = sp.shading
-            if sh.type == 'SOLID' and sh.light != 'MATCAP':
-                shading_restore = (sh, sh.light, sh.color_type)
-                sh.light = 'MATCAP'
-                sh.color_type = 'SINGLE'
-            bg_restore = (sh, sh.background_type, tuple(sh.background_color))
-            sh.background_type = 'VIEWPORT'
-            sh.background_color = (0.0, 0.0, 0.0)
-            break
-
-    # Per-object wire display (`obj.show_wire = True` or `display_type='WIRE'`)
-    # forces a wireframe in solid shading regardless of the overlay toggle, so
-    # FLUX preserves those edges outside the mask. Force the active object to
-    # plain solid display for the render and restore after.
     obj = bpy.context.active_object
     show_wire_prev = None
     display_type_prev = None
-    if obj is not None:
-        show_wire_prev = obj.show_wire
-        display_type_prev = obj.display_type
-        obj.show_wire = False
-        if obj.display_type in {'WIRE', 'BOUNDS'}:
-            obj.display_type = 'SOLID'
-
-    # Edit Mode bakes the mesh wireframe straight into `render.opengl` output
-    # regardless of the overlay toggle — FLUX then preserves that wire pattern
-    # outside the mask, polluting every subsequent UV sample. Drop to Object
-    # Mode for the render so the mesh comes back clean.
-    was_edit = obj is not None and obj.mode == 'EDIT'
-    if was_edit:
-        bpy.ops.object.mode_set(mode='OBJECT')
-
+    was_edit = False
     out_path = tempfile.NamedTemporaryFile(suffix='.png', delete=False).name
-    scene.render.image_settings.file_format = 'PNG'
-    scene.render.filepath = out_path
+
     try:
+        scene.render.resolution_x = region_width
+        scene.render.resolution_y = region_height
+
+        for sp in area.spaces:
+            if sp.type == 'VIEW_3D' and sp.overlay.show_overlays:
+                hidden_spaces.append(sp)
+                sp.overlay.show_overlays = False
+
+        # Surface-shading restore record. When the viewport is in Solid mode
+        # with FLAT/STUDIO/MATCAP=FLAT, the AI's init image is a uniformly-
+        # coloured silhouette with no normal cue. Flipping briefly to MATCAP
+        # gives the model a depth-anything-style shaded surface to work from.
+        # Material Preview / Rendered shading already carries rich detail, so
+        # we leave them alone.
+        #
+        # We also force a black viewport background during the render — theme
+        # grey, gradient sky, or world-coloured backgrounds leak into the
+        # result and confuse FLUX-general's depth+inpaint recipe.
+        if force_matcap:
+            for sp in area.spaces:
+                if sp.type != 'VIEW_3D':
+                    continue
+                sh = sp.shading
+                if sh.type == 'SOLID' and sh.light != 'MATCAP':
+                    shading_restore = (sh, sh.light, sh.color_type)
+                    sh.light = 'MATCAP'
+                    sh.color_type = 'SINGLE'
+                bg_restore = (sh, sh.background_type, tuple(sh.background_color))
+                sh.background_type = 'VIEWPORT'
+                sh.background_color = (0.0, 0.0, 0.0)
+                break
+
+        # Per-object wire display (`obj.show_wire = True` or
+        # `display_type='WIRE'`) forces a wireframe in solid shading regardless
+        # of the overlay toggle, so FLUX preserves those edges outside the
+        # mask. Force the active object to plain solid display for the render
+        # and restore after.
+        if obj is not None:
+            show_wire_prev = obj.show_wire
+            display_type_prev = obj.display_type
+            obj.show_wire = False
+            if obj.display_type in {'WIRE', 'BOUNDS'}:
+                obj.display_type = 'SOLID'
+
+        # Edit Mode bakes the mesh wireframe straight into `render.opengl`
+        # output regardless of the overlay toggle — FLUX then preserves that
+        # wire pattern outside the mask, polluting every subsequent UV sample.
+        # Drop to Object Mode for the render so the mesh comes back clean.
+        was_edit = obj is not None and obj.mode == 'EDIT'
+        if was_edit:
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        scene.render.image_settings.file_format = 'PNG'
+        scene.render.filepath = out_path
         bpy.ops.render.opengl(write_still=True, view_context=True)
         img = bpy.data.images.load(out_path)
         try:
@@ -100,7 +110,10 @@ def render_visible_image(area, region_width: int, region_height: int,
             bpy.data.images.remove(img)
     finally:
         if was_edit:
-            bpy.ops.object.mode_set(mode='EDIT')
+            try:
+                bpy.ops.object.mode_set(mode='EDIT')
+            except Exception:
+                pass
         for sp in hidden_spaces:
             sp.overlay.show_overlays = True
         if obj is not None and show_wire_prev is not None:
