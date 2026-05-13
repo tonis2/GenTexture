@@ -4,6 +4,8 @@ A Blender addon that turns AI image-generation APIs into a node-based texture
 pipeline. Wire a graph in the Node Editor; press Run; get textures back on
 your meshes.
 
+![Viewport projection example](assets/projection.jpg)
+
 
 ## Installation
 
@@ -29,6 +31,8 @@ The fastest way to see something work:
 
 Status messages and errors appear in the header next to the Run button while
 the graph is executing.
+
+![Node graph example](assets/texture_nodes.jpg)
 
 
 ## Providers

@@ -51,19 +51,13 @@ class GenTexNodeProjectLayer(GenTexPipelineNodeBase, bpy.types.Node):
     bl_label = "Project Layer"
     bl_icon = "IMAGE_RGB_ALPHA"
 
-    auto_bake: bpy.props.BoolProperty(
-        name="Auto Bake",
-        description="After projecting, bake the layer stack into the object's real UVs",
-        default=True,
-    )
-
     def init(self, context):
         self.inputs.new("GenTexImageSocket", "Image")
         self.inputs.new("GenTexImageSocket", "Capture")
 
     def draw_buttons(self, context, layout):
-        layout.prop(self, "auto_bake")
         layout.label(text="Needs Viewport Capture upstream", icon='INFO')
+        layout.label(text="Bake from the Layers panel", icon='INFO')
 
     def evaluate(self, ctx):
         png = upstream_value(self, "Image", ctx, default=None)
@@ -118,31 +112,3 @@ class GenTexNodeProjectLayer(GenTexPipelineNodeBase, bpy.types.Node):
             for area in window.screen.areas:
                 if area.type == 'VIEW_3D':
                     area.tag_redraw()
-
-        if not self.auto_bake:
-            return
-
-        # Defer the bake — it's the heaviest step (Cycles render). Letting the
-        # executor advance past this node first means status messages update,
-        # the layer-stack material paints on the mesh, and the UI redraws BEFORE
-        # the multi-second bake kicks in. Use a timer to schedule it on the
-        # main thread one tick later.
-        objs_to_bake = [obj for obj, _, _ in ctx.captured_per_obj
-                        if obj.data.uv_layers.active is not None]
-
-        def _bake():
-            for obj in objs_to_bake:
-                bpy.context.scene.gentex_info = f"Baking {obj.name}..."
-                prev_active = bpy.context.view_layer.objects.active
-                bpy.context.view_layer.objects.active = obj
-                try:
-                    bpy.ops.gentex.bake_layers()
-                    obj.gentex_use_baked = True
-                except Exception as bake_err:
-                    print(f"[GenTex] auto-bake failed: {bake_err}")
-                finally:
-                    bpy.context.view_layer.objects.active = prev_active
-            bpy.context.scene.gentex_info = ""
-            return None
-
-        bpy.app.timers.register(_bake, first_interval=0.1)

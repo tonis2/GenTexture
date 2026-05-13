@@ -6,36 +6,33 @@ def _use_baked_changed(self, context):
     apply_baked_toggle(self, self.gentex_use_baked)
 
 
-_REBAKE_GUARD = False
+_LAYER_CHANGE_GUARD = False
 
 
 def _layer_changed(self, context):
     """Rebuild the host object's layer-stack material when a layer changes.
 
-    When the object is currently displaying its baked composite, the layer-stack
-    material isn't visible — so we also re-run the bake so toggles like
-    `visible` and `opacity` actually show up in the viewport.
+    If the object is currently displaying its baked composite, flip it back
+    to the live layer-stack material so toggles are immediately visible —
+    re-baking on every visibility/opacity tweak is too expensive (Cycles
+    render, multi-second freeze). User re-bakes manually when satisfied.
     """
+    global _LAYER_CHANGE_GUARD
+    if _LAYER_CHANGE_GUARD:
+        return
+
     from .utils.material import rebuild_layer_stack
     obj = self.id_data
     if obj is None:
         return
     rebuild_layer_stack(obj)
 
-    global _REBAKE_GUARD
-    if obj.gentex_use_baked and obj.gentex_layers and not _REBAKE_GUARD:
-        _REBAKE_GUARD = True
+    if obj.gentex_use_baked:
+        _LAYER_CHANGE_GUARD = True
         try:
-            prev_active = bpy.context.view_layer.objects.active
-            bpy.context.view_layer.objects.active = obj
-            try:
-                bpy.ops.gentex.bake_layers()
-            except Exception as e:
-                print(f"[GenTex] re-bake on layer change failed: {e}")
-            finally:
-                bpy.context.view_layer.objects.active = prev_active
+            obj.gentex_use_baked = False
         finally:
-            _REBAKE_GUARD = False
+            _LAYER_CHANGE_GUARD = False
 
     for window in bpy.context.window_manager.windows:
         for area in window.screen.areas:

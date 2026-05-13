@@ -7,22 +7,42 @@ import bpy
 import numpy as np
 
 
-def np_to_bpy(array: np.ndarray, name: str, existing: bpy.types.Image | None = None) -> bpy.types.Image:
-    """Convert a numpy RGBA float32 array (H, W, 4) to a Blender image."""
+def np_to_bpy(
+    array: np.ndarray,
+    name: str,
+    existing: bpy.types.Image | None = None,
+    *,
+    float_buffer: bool = False,
+    pack: bool = True,
+) -> bpy.types.Image:
+    """Convert a numpy RGBA float32 array (H, W, 4) to a Blender image.
+
+    Defaults to an 8-bit storage buffer — our LDR generator outputs and masks
+    fit fine in uint8, and float buffers (16 B/px) make image creation and
+    packing ~4× slower for no visual gain. Callers that need HDR can pass
+    `float_buffer=True`.
+
+    `pack=True` writes the pixel data into the .blend container so save/reload
+    preserves it. Skip if the image is throwaway (e.g. an intermediate the
+    caller is going to bake out of and immediately remove).
+    """
     h, w = array.shape[:2]
     if existing is not None and existing.size[0] == w and existing.size[1] == h:
         image = existing
     else:
         if existing is not None:
             bpy.data.images.remove(existing)
-        image = bpy.data.images.new(name, width=w, height=h, alpha=True, float_buffer=True)
+        image = bpy.data.images.new(
+            name, width=w, height=h, alpha=True, float_buffer=float_buffer,
+        )
 
     pixels = array.astype(np.float32)
     # Blender stores pixels bottom-to-top, numpy is top-to-bottom
     pixels = np.flipud(pixels).ravel()
     image.pixels.foreach_set(pixels)
     image.update()
-    image.pack()
+    if pack:
+        image.pack()
     return image
 
 
