@@ -2,7 +2,8 @@
 
 Calls https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
 with a Google AI Studio API key. Avoids fal.ai entirely so the user can pick
-their model (gemini-2.5-flash-image or gemini-3-pro-image-preview) directly.
+their model (gemini-3.5-flash-image, gemini-2.5-flash-image, or
+gemini-3-pro-image-preview) directly.
 
 Capabilities: text2img, img2img (init image becomes another input image),
 and reference_images (sent as additional inline_data parts). Gemini doesn't
@@ -45,10 +46,14 @@ images_b64 = config.get("images_b64", [])
 output_path = config["output_path"]
 
 parts = []
-if prompt:
-    parts.append({"text": prompt})
+# Gemini image editing is order-sensitive: the image(s) must come BEFORE the
+# text instruction. Sending text first makes Gemini treat the prompt as a loose
+# caption and pass the input through recolored (the "not an edit" failure mode);
+# image-first makes it actually edit the supplied image.
 for b64 in images_b64:
     parts.append({"inline_data": {"mime_type": "image/png", "data": b64}})
+if prompt:
+    parts.append({"text": prompt})
 
 body = {
     "contents": [{"parts": parts}],
@@ -137,10 +142,10 @@ class GeminiDirectProvider(Provider):
                 label="Default Model",
                 description="Model ID used when the Generate node doesn't override it",
                 kind="enum",
-                default="gemini-2.5-flash-image",
+                default="gemini-3-pro-image-preview",
                 items=[
-                    ("gemini-2.5-flash-image", "Gemini 2.5 Flash Image (Nano Banana)", ""),
                     ("gemini-3-pro-image-preview", "Gemini 3 Pro Image Preview (Nano Banana 2)", ""),
+                    ("gemini-2.5-flash-image", "Gemini 2.5 Flash Image (Nano Banana)", ""),
                 ],
             ),
         ]
@@ -155,7 +160,7 @@ class GeminiDirectProvider(Provider):
 
         model = (request.__dict__.get("_model_override") or "").strip()
         if not model:
-            model = self.settings.get("default_model") or "gemini-2.5-flash-image"
+            model = self.settings.get("default_model") or "gemini-3-pro-image-preview"
 
         try:
             with open(_STATUS_FILE, "w") as f:
