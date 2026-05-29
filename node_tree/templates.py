@@ -61,9 +61,9 @@ def build_pbr_template(tree, ox, oy):
     ref.label = "Concept / Source"
 
     rows = [
-        ("Albedo",    "clean albedo map, flat even lighting, no shadows, no highlights"),
-        ("Normal",    "tangent-space normal map, OpenGL convention, RGB encodes XYZ"),
-        ("Roughness", "grayscale roughness map, white = rough, black = smooth"),
+        ("Albedo", "Create albedo map texture, that can be used in game engine as material, take reference from the style of attached image.Texture must be seamless on all axes."),
+        ("Normal",  "Create normal map texture, that can be used in game engine as material, take reference from the attached image. Texture must be seamless on all axes"),
+        ("Depth", "Create depth map texture, that can be used in game engine as material, take reference from the attached image.Texture must be seamless on all axes"),
     ]
 
     created = [ref]
