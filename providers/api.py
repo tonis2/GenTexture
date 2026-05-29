@@ -218,7 +218,22 @@ class Provider(ABC):
 # Registry
 # ---------------------------------------------------------------------------
 
-PROVIDERS: dict[str, type[Provider]] = {}
+# Canonical provider registry — the single source of truth.
+#
+# `globals().get(...)` (rather than a bare `= {}`) is load-bearing: an
+# importlib.reload() of this module re-executes this body in the SAME module
+# namespace, so reusing any pre-existing dict keeps ONE registry object alive
+# for the whole process. A bare `= {}` would rebind this name to a fresh dict
+# on every reload while every `from .providers import PROVIDERS` consumer still
+# holds the old one — the registry then forks, and the generator silently reads
+# a stale copy that the provider modules no longer register into. (That exact
+# split is what made addon edits appear to have no effect.)
+#
+# To stay safe against this, consumers MUST NOT capture this dict by value.
+# Go through the accessor functions below: being module-level functions, they
+# late-bind `PROVIDERS` from this module's namespace at call time, so they
+# always resolve the live registry regardless of reload order.
+PROVIDERS: dict[str, type[Provider]] = globals().get("PROVIDERS", {})
 
 
 def register_provider(cls: type[Provider]) -> type[Provider]:
@@ -232,8 +247,31 @@ def register_provider(cls: type[Provider]) -> type[Provider]:
     return cls
 
 
+# ---- registry accessors (the supported way to read the registry) ----------
+
+def has_provider(provider_id: str) -> bool:
+    """True if a provider with this id is registered."""
+    return provider_id in PROVIDERS
+
+
+def provider_ids() -> list[str]:
+    """Sorted list of registered provider ids."""
+    return sorted(PROVIDERS)
+
+
+def iter_providers() -> list[tuple[str, type[Provider]]]:
+    """Snapshot of (id, provider_class) pairs from the live registry."""
+    return list(PROVIDERS.items())
+
+
+def get_provider_class(provider_id: str) -> type[Provider]:
+    """Return the registered provider class, or raise ProviderError."""
+    try:
+        return PROVIDERS[provider_id]
+    except KeyError:
+        raise ProviderError(f"Unknown provider '{provider_id}'") from None
+
+
 def get_provider(provider_id: str, settings: dict | None = None) -> Provider:
     """Instantiate a registered provider by id."""
-    if provider_id not in PROVIDERS:
-        raise ProviderError(f"Unknown provider '{provider_id}'")
-    return PROVIDERS[provider_id](settings or {})
+    return get_provider_class(provider_id)(settings or {})

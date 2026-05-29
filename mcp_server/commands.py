@@ -21,9 +21,12 @@ import threading
 import bpy
 
 from ..providers import (
-    PROVIDERS,
     GenerateRequest,
     ProviderError,
+    get_provider,
+    has_provider,
+    iter_providers,
+    provider_ids,
 )
 from ..utils.image import (
     bpy_to_np,
@@ -132,13 +135,13 @@ def _auto_name(provider_id: str, prompt: str) -> str:
 
 def cmd_status(params: dict) -> dict:
     """Cheap health check; doesn't touch bpy."""
-    return {"ok": True, "providers": sorted(PROVIDERS.keys())}
+    return {"ok": True, "providers": provider_ids()}
 
 
 def cmd_list_providers(params: dict) -> dict:
     def _read():
         out = []
-        for pid, pcls in PROVIDERS.items():
+        for pid, pcls in iter_providers():
             settings = _get_settings(pid)
             api_key_present = bool(settings.get("api_key"))
             out.append({
@@ -176,16 +179,16 @@ def _run_generation(params: dict, default_op: str) -> dict:
     provider_id = params.get("provider")
     if not provider_id:
         raise ValueError("'provider' is required")
-    if provider_id not in PROVIDERS:
+    if not has_provider(provider_id):
         raise ValueError(
-            f"Unknown provider '{provider_id}'. Available: {sorted(PROVIDERS.keys())}"
+            f"Unknown provider '{provider_id}'. Available: {provider_ids()}"
         )
 
     # bpy work (read settings, resolve images by name) on the main thread
     settings, req = main_thread.run_on_main(
         lambda: (_get_settings(provider_id), _build_request(params))
     )
-    inst = PROVIDERS[provider_id](settings)
+    inst = get_provider(provider_id, settings)
 
     # Provider call: blocking, runs subprocess HTTP. Serialize per-provider
     # because some providers write a fixed tempfile for status polling.

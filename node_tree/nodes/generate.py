@@ -14,12 +14,12 @@ import bpy
 from ._base import GenTexPipelineNodeBase, upstream_value, upstream_multi_input
 from ...preferences import ADDON_PKG
 from ...providers import (
-    PROVIDERS, GenerateRequest,
+    GenerateRequest, get_provider, has_provider, iter_providers,
 )
 
 
 def _provider_items(self, context):
-    return [(pid, cls.label or pid, cls.__doc__ or "") for pid, cls in PROVIDERS.items()]
+    return [(pid, cls.label or pid, cls.__doc__ or "") for pid, cls in iter_providers()]
 
 
 class GenTexNodeGenerate(GenTexPipelineNodeBase, bpy.types.Node):
@@ -76,7 +76,7 @@ class GenTexNodeGenerate(GenTexPipelineNodeBase, bpy.types.Node):
         layout.prop(self, "model")
 
     def evaluate(self, ctx):
-        if self.provider not in PROVIDERS:
+        if not has_provider(self.provider):
             raise RuntimeError(f"{self.name}: provider '{self.provider}' not registered")
 
         prefs = bpy.context.preferences.addons[ADDON_PKG].preferences
@@ -113,8 +113,7 @@ class GenTexNodeGenerate(GenTexPipelineNodeBase, bpy.types.Node):
         if self.model.strip():
             object.__setattr__(request, "_model_override", self.model.strip())
 
-        provider_cls = PROVIDERS[self.provider]
-        provider = provider_cls(settings)
+        provider = get_provider(self.provider, settings)
         result = provider.generate(request)
 
         ctx.cache[self.cache_key(self.outputs["Image"])] = result.image_bytes

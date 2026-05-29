@@ -3,8 +3,8 @@
 Two provider classes share fal's queue-based worker protocol via `_FalBase`:
 
   * `FalFluxProvider`         - Black Forest Labs FLUX. Full caps incl. inpaint.
-  * `FalNanoBananaProvider`   - Google Gemini 2.5 Flash Image. Multi-image
-                                consistency; no native mask channel.
+  * `FalNanoBananaProvider`   - Google Nano Banana 2 (Gemini 3.1 Flash Image).
+                                Reasoning-guided edits; no native mask channel.
 
 Both endpoints follow the same async-queue pattern:
   POST /<model>            -> { request_id, status_url, response_url }
@@ -350,13 +350,39 @@ class FalFluxGeneralProvider(_FalBase):
 
 
 # ---------------------------------------------------------------------------
-# Nano Banana (Gemini 2.5 Flash Image)
+# Nano Banana 2 (Gemini 3.1 Flash Image)
 # ---------------------------------------------------------------------------
+# Nano Banana 2 is a generational leap over the original Nano Banana (Gemini
+# 2.5 Flash Image): it reasons about the request before rendering. With
+# `thinking_level` enabled it actually follows data-conversion instructions
+# like "produce a tangent-space normal map" instead of just hue-shifting the
+# input. The old `fal-ai/gemini-25-flash-image[/edit]` endpoints ignored such
+# prompts, so we target the nano-banana-2 endpoints here.
+
+# Generation params. `thinking_level` ("minimal"/"high", or None to disable)
+# is the reasoning pass that makes the model obey complex instructions.
+_NANO_BANANA_RESOLUTION = "1K"        # "0.5K" / "1K" / "2K" / "4K"
+_NANO_BANANA_THINKING = "high"        # "minimal" / "high" / None
+_NANO_BANANA_ASPECT = "auto"
+
+
+def _nano_banana_body(prompt: str) -> dict:
+    body = {
+        "prompt": prompt,
+        "num_images": 1,
+        "aspect_ratio": _NANO_BANANA_ASPECT,
+        "output_format": "png",
+        "resolution": _NANO_BANANA_RESOLUTION,
+    }
+    if _NANO_BANANA_THINKING:
+        body["thinking_level"] = _NANO_BANANA_THINKING
+    return body
+
 
 @register_provider
 class FalNanoBananaProvider(_FalBase):
     id = "fal_nano_banana"
-    label = "fal · Nano Banana (Gemini 2.5 Flash Image)"
+    label = "fal · Nano Banana 2 (Gemini 3.1 Flash Image)"
 
     @classmethod
     def capabilities(cls) -> set[str]:
@@ -365,27 +391,19 @@ class FalNanoBananaProvider(_FalBase):
         return {CAP_TEXT2IMG, CAP_IMG2IMG, CAP_REFERENCE_IMAGES}
 
     def text2img(self, request: GenerateRequest) -> GenerateResult:
-        body = {
-            "prompt": request.prompt,
-            "num_images": 1,
-            "output_format": "png",
-        }
+        body = _nano_banana_body(request.prompt)
         if request.reference_images:
             # When refs are present, route through the edit endpoint.
             body["image_urls"] = [_to_data_uri(b) for b in request.reference_images]
-            return self._run("fal-ai/gemini-25-flash-image/edit", body)
-        return self._run("fal-ai/gemini-25-flash-image", body)
+            return self._run("fal-ai/nano-banana-2/edit", body)
+        return self._run("fal-ai/nano-banana-2", body)
 
     def img2img(self, request: GenerateRequest) -> GenerateResult:
         urls = [_to_data_uri(request.init_image)]
         urls.extend(_to_data_uri(b) for b in request.reference_images)
-        body = {
-            "prompt": request.prompt,
-            "image_urls": urls,
-            "num_images": 1,
-            "output_format": "png",
-        }
-        return self._run("fal-ai/gemini-25-flash-image/edit", body)
+        body = _nano_banana_body(request.prompt)
+        body["image_urls"] = urls
+        return self._run("fal-ai/nano-banana-2/edit", body)
 
 
 # ---------- helpers ---------------------------------------------------------

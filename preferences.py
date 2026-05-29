@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import bpy
 
-from .providers import PROVIDERS, PreferenceField
+from .providers import (
+    PreferenceField, get_provider_class, has_provider, iter_providers,
+)
 # Import provider modules so they self-register into PROVIDERS before we
 # build the AddonPreferences class.
 from .providers import stability as _stability  # noqa: F401
@@ -107,7 +109,7 @@ def _draw(self, context):
             status_row.label(text="Stopped", icon='RADIOBUT_OFF')
         status_row.operator("gentex.mcp_start", text="Start", icon='PLAY')
 
-    for pid, pcls in PROVIDERS.items():
+    for pid, pcls in iter_providers():
         fields = pcls.preference_fields()
         if not fields:
             continue
@@ -122,10 +124,10 @@ def _draw(self, context):
 
 def _get_provider_settings(self, provider_id: str) -> dict:
     """Return a flat {field_name: value} dict for the given provider."""
-    if provider_id not in PROVIDERS:
+    if not has_provider(provider_id):
         return {}
     out = {}
-    for f in PROVIDERS[provider_id].preference_fields():
+    for f in get_provider_class(provider_id).preference_fields():
         out[f.name] = getattr(self, _attr_name(provider_id, f.name), f.default)
     return out
 
@@ -168,7 +170,7 @@ def _build_preferences_class():
         ),
     }
 
-    for pid, pcls in PROVIDERS.items():
+    for pid, pcls in iter_providers():
         for f in pcls.preference_fields():
             annotations[_attr_name(pid, f.name)] = _to_bpy_prop(f)
 
