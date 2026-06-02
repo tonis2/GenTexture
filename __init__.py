@@ -47,10 +47,6 @@ from .operators import run_pipeline as _run_pipeline
 
 from .ui import panels as _panels
 
-# MCP server (TCP JSON command dispatcher, optional)
-from . import mcp_server as _mcp_server
-from .mcp_server import operators as _mcp_ops
-
 
 if _needs_reload:
     import importlib
@@ -87,8 +83,6 @@ if _needs_reload:
     _layers = importlib.reload(_layers)
     _run_pipeline = importlib.reload(_run_pipeline)
     _panels = importlib.reload(_panels)
-    _mcp_server = importlib.reload(_mcp_server)
-    _mcp_ops = importlib.reload(_mcp_ops)
 
 
 import bpy
@@ -120,8 +114,6 @@ classes = (
     _panels.GENTEX_PT_bake,
     # Node editor sidebar
     _nt_panels.GENTEX_PT_pipeline,
-    # MCP server start/stop operators
-    *_mcp_ops.classes,
 )
 
 
@@ -145,21 +137,8 @@ def register():
     _nt_panels.register_header()
     _nt_templates.register_add_menu()
 
-    # Auto-start the MCP server if the user previously enabled it.
-    try:
-        prefs = bpy.context.preferences.addons[__package__].preferences
-        if getattr(prefs, "mcp_enabled", False):
-            _mcp_server.start_server(prefs.mcp_host, int(prefs.mcp_port))
-    except Exception as e:
-        print(f"GenTexture: MCP auto-start skipped: {e}")
-
 
 def unregister():
-    try:
-        _mcp_server.stop_server()
-    except Exception as e:
-        print(f"GenTexture: MCP stop on unregister failed: {e}")
-
     _nt_templates.unregister_add_menu()
     _nt_panels.unregister_header()
     _nt_tree.unregister_categories()
