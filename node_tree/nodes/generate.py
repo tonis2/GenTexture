@@ -14,12 +14,34 @@ import bpy
 from ._base import GenTexPipelineNodeBase, upstream_value, upstream_multi_input
 from ...preferences import ADDON_PKG
 from ...providers import (
-    GenerateRequest, get_provider, has_provider, iter_providers,
+    GenerateRequest, get_provider, get_provider_class, has_provider, iter_providers,
 )
 
 
 def _provider_items(self, context):
     return [(pid, cls.label or pid, cls.__doc__ or "") for pid, cls in iter_providers()]
+
+
+# Cache built enum item lists per provider so the (id, label, desc) string
+# objects stay referenced — Blender can corrupt/crash on dynamic EnumProperty
+# items whose strings get garbage-collected between the callback and use.
+_model_items_cache: dict = {}
+
+
+def _provider_models(provider_id):
+    """Models declared by a provider, or [] if it has none / isn't registered."""
+    if not has_provider(provider_id):
+        return []
+    return get_provider_class(provider_id).models()
+
+
+def _model_items(self, context):
+    pid = getattr(self, "provider", "") or ""
+    items = [("", "Default", "Use the provider's configured default model")]
+    for m in _provider_models(pid):
+        items.append(tuple(m))
+    _model_items_cache[pid] = items
+    return _model_items_cache[pid]
 
 
 class GenTexNodeGenerate(GenTexPipelineNodeBase, bpy.types.Node):
@@ -38,13 +60,22 @@ class GenTexNodeGenerate(GenTexPipelineNodeBase, bpy.types.Node):
         items=_provider_items,
     )
 
+    # Free-text override, shown for providers that don't declare a model list.
     model: bpy.props.StringProperty(
         name="Model",
         description=(
-            "Override the provider's default model (used by Gemini direct). "
+            "Override the provider's default model. "
             "Leave empty for the provider's default."
         ),
         default="",
+    )
+
+    # Dropdown override, shown for providers that declare models() (e.g. Gemini
+    # direct). "" (the leading "Default" item) means use the provider default.
+    model_enum: bpy.props.EnumProperty(
+        name="Model",
+        description="Model to use, from the provider's configured list",
+        items=_model_items,
     )
 
     def init(self, context):
@@ -73,7 +104,11 @@ class GenTexNodeGenerate(GenTexPipelineNodeBase, bpy.types.Node):
 
     def draw_buttons(self, context, layout):
         layout.prop(self, "provider")
-        layout.prop(self, "model")
+        # Dropdown when the provider declares models, free-text otherwise.
+        if _provider_models(self.provider):
+            layout.prop(self, "model_enum")
+        else:
+            layout.prop(self, "model")
 
     def evaluate(self, ctx):
         if not has_provider(self.provider):
@@ -110,8 +145,13 @@ class GenTexNodeGenerate(GenTexPipelineNodeBase, bpy.types.Node):
         )
         # Stash the per-node model override for providers that look for it.
         # gemini_direct uses request._model_override; other providers ignore it.
-        if self.model.strip():
-            object.__setattr__(request, "_model_override", self.model.strip())
+        # Providers with a model list use the dropdown; others the text field.
+        if _provider_models(self.provider):
+            chosen = self.model_enum  # "" = the leading "Default" item
+        else:
+            chosen = self.model.strip()
+        if chosen:
+            object.__setattr__(request, "_model_override", chosen)
 
         provider = get_provider(self.provider, settings)
         result = provider.generate(request)

@@ -1,12 +1,17 @@
-"""fal.ai providers.
+"""fal.ai provider.
 
-Two provider classes share fal's queue-based worker protocol via `_FalBase`:
+A single provider (`id = "fal"`) that exposes fal's image models through one
+model dropdown on the Generate node. Picking a model selects both its
+capabilities and how the request is built/routed:
 
-  * `FalFluxProvider`         - Black Forest Labs FLUX. Full caps incl. inpaint.
-  * `FalNanoBananaProvider`   - Google Nano Banana 2 (Gemini 3.1 Flash Image).
-                                Reasoning-guided edits; no native mask channel.
+  * nano_banana_2  - Google Nano Banana 2 (Gemini 3.1 Flash Image).
+                     Reasoning-guided edits; no native mask channel.
+  * flux           - Black Forest Labs FLUX (schnell / dev / pro-fill).
+                     text2img, img2img, inpaint via separate endpoints.
+  * flux_general   - fal's `flux-general` pipeline. Inpaint + IP-Adapter
+                     style references + depth ControlNet in one call.
 
-Both endpoints follow the same async-queue pattern:
+All endpoints follow the same async-queue protocol:
   POST /<model>            -> { request_id, status_url, response_url }
   GET  status_url          -> poll until status == "COMPLETED"
   GET  response_url        -> { images: [{url}], seed }
@@ -18,10 +23,12 @@ from __future__ import annotations
 import base64
 import os
 import tempfile
+from dataclasses import dataclass
+from typing import Callable
 
 from .api import (
     Provider, GenerateRequest, GenerateResult, PreferenceField,
-    AuthenticationError,
+    AuthenticationError, ProviderError,
     register_provider,
     CAP_TEXT2IMG, CAP_IMG2IMG, CAP_INPAINT,
     CAP_REFERENCE_IMAGES, CAP_DEPTH_CONTROL,
@@ -154,11 +161,199 @@ print(json.dumps({"seed": seed, "size": len(img_data)}))
 
 
 # ---------------------------------------------------------------------------
-# Shared base
+# IP-Adapter / depth ControlNet defaults (flux_general)
 # ---------------------------------------------------------------------------
 
-class _FalBase(Provider):
-    """Shared queue-protocol logic + API-key field."""
+# Default IP-Adapter checkpoints used when `reference_images` are supplied.
+# These ship with fal's flux-general endpoint and don't require extra config.
+_FLUX_IP_ADAPTER_PATH = "XLabs-AI/flux-ip-adapter"
+# Without `weight_name`, fal's loader can't pick a file out of the repo and
+# 422s with "Failed to download ip-adapter weights: 'NoneType' object has no
+# attribute 'split'" — it's literally splitting a None URL.
+_FLUX_IP_ADAPTER_WEIGHT = "ip_adapter.safetensors"
+_FLUX_IP_ADAPTER_ENCODER = "openai/clip-vit-large-patch14"
+
+# Depth ControlNet checkpoint used when `depth_image` is supplied. Shakker-Labs'
+# FLUX.1-dev depth ControlNet is the de-facto choice — it ships with fal and
+# expects depth-anything-v2-style maps (white = near, black = far), which is
+# the convention our `render_depth_map` produces.
+_FLUX_DEPTH_CONTROLNET_PATH = "Shakker-Labs/FLUX.1-dev-ControlNet-Depth"
+
+
+# ---------------------------------------------------------------------------
+# Nano Banana 2 generation params
+# ---------------------------------------------------------------------------
+# Nano Banana 2 is a generational leap over the original Nano Banana (Gemini
+# 2.5 Flash Image): it reasons about the request before rendering. With
+# `thinking_level` enabled it actually follows data-conversion instructions
+# like "produce a tangent-space normal map" instead of just hue-shifting.
+_NANO_BANANA_RESOLUTION = "1K"        # "0.5K" / "1K" / "2K" / "4K"
+_NANO_BANANA_THINKING = "high"        # "minimal" / "high" / None
+_NANO_BANANA_ASPECT = "auto"
+
+
+def _nano_banana_body(prompt: str) -> dict:
+    body = {
+        "prompt": prompt,
+        "num_images": 1,
+        "aspect_ratio": _NANO_BANANA_ASPECT,
+        "output_format": "png",
+        "resolution": _NANO_BANANA_RESOLUTION,
+    }
+    if _NANO_BANANA_THINKING:
+        body["thinking_level"] = _NANO_BANANA_THINKING
+    return body
+
+
+# ---------------------------------------------------------------------------
+# Per-model request builders. Each returns (endpoint_path, request_body) and
+# branches internally on the request shape (text2img / img2img / inpaint).
+# ---------------------------------------------------------------------------
+
+def _flux_build(req: GenerateRequest) -> tuple[str, dict]:
+    if req.is_inpaint:
+        body = {
+            "prompt": req.prompt,
+            "image_url": _to_data_uri(req.init_image),
+            "mask_url": _to_data_uri(req.mask_image),
+            "num_images": 1,
+            "output_format": "png",
+        }
+        if req.seed is not None:
+            body["seed"] = req.seed
+        return "fal-ai/flux-pro/v1/fill", body
+    if req.is_img2img:
+        body = {
+            "prompt": req.prompt,
+            "image_url": _to_data_uri(req.init_image),
+            "strength": req.strength,
+            "num_images": 1,
+            "output_format": "png",
+        }
+        if req.seed is not None:
+            body["seed"] = req.seed
+        return "fal-ai/flux/dev/image-to-image", body
+    body = {
+        "prompt": req.prompt,
+        "image_size": {"width": req.width, "height": req.height},
+        "num_images": 1,
+        "output_format": "png",
+    }
+    if req.seed is not None:
+        body["seed"] = req.seed
+    return "fal-ai/flux/schnell", body
+
+
+def _flux_general_build(req: GenerateRequest) -> tuple[str, dict]:
+    # All capabilities map to the same endpoint — only the body fields change.
+    body = {
+        "prompt": req.prompt,
+        "num_images": 1,
+        "output_format": "png",
+        "image_size": {"width": req.width, "height": req.height},
+    }
+    if req.seed is not None:
+        body["seed"] = req.seed
+    if req.negative_prompt:
+        body["negative_prompt"] = req.negative_prompt
+
+    if req.init_image is not None:
+        body["image_url"] = _to_data_uri(req.init_image)
+        body["strength"] = req.strength
+    if req.mask_image is not None:
+        body["mask_url"] = _to_data_uri(req.mask_image)
+
+    if req.reference_images:
+        # Spread weight evenly across references and cap at 0.6 per ref. Higher
+        # scales (>=0.8) overpower the depth ControlNet and FLUX starts
+        # duplicating reference features. 0.5-0.6 is the sweet spot with depth.
+        per_ref = min(0.6, 1.0 / len(req.reference_images))
+        body["ip_adapters"] = [{
+            "path": _FLUX_IP_ADAPTER_PATH,
+            "weight_name": _FLUX_IP_ADAPTER_WEIGHT,
+            "image_encoder_path": _FLUX_IP_ADAPTER_ENCODER,
+            "image_url": _to_data_uri(ref),
+            "scale": per_ref,
+        } for ref in req.reference_images]
+
+    if req.depth_image is not None:
+        # Depth ControlNet — makes the generated content wrap the mesh's 3D
+        # structure instead of being flat inside the silhouette. Release before
+        # the final steps so prompt-driven high-frequency detail isn't clipped.
+        body["controlnets"] = [{
+            "path": _FLUX_DEPTH_CONTROLNET_PATH,
+            "control_image_url": _to_data_uri(req.depth_image),
+            "conditioning_scale": req.depth_scale,
+            "start_percentage": 0.0,
+            "end_percentage": 0.8,
+        }]
+
+    return "fal-ai/flux-general", body
+
+
+def _nano_banana_build(req: GenerateRequest) -> tuple[str, dict]:
+    body = _nano_banana_body(req.prompt)
+    # Nano Banana has no mask channel; an inpaint request (init+mask) is treated
+    # as an edit of the init image — the addon composites the mask client-side.
+    if req.init_image is not None:
+        urls = [_to_data_uri(req.init_image)]
+        urls.extend(_to_data_uri(b) for b in req.reference_images)
+        body["image_urls"] = urls
+        return "fal-ai/nano-banana-2/edit", body
+    if req.reference_images:
+        body["image_urls"] = [_to_data_uri(b) for b in req.reference_images]
+        return "fal-ai/nano-banana-2/edit", body
+    return "fal-ai/nano-banana-2", body
+
+
+@dataclass(frozen=True)
+class _FalModel:
+    id: str
+    label: str
+    caps: frozenset
+    build: Callable[[GenerateRequest], tuple]
+
+
+# Single source of truth for the model dropdown + routing. First entry is the
+# default used when the Generate node leaves the model on "Default".
+_FAL_MODELS = [
+    _FalModel(
+        "nano_banana_2", "Nano Banana 2 (Gemini 3.1 Flash Image)",
+        frozenset({CAP_TEXT2IMG, CAP_IMG2IMG, CAP_REFERENCE_IMAGES}),
+        _nano_banana_build,
+    ),
+    _FalModel(
+        "flux", "FLUX (schnell / dev / pro-fill)",
+        frozenset({CAP_TEXT2IMG, CAP_IMG2IMG, CAP_INPAINT}),
+        _flux_build,
+    ),
+    _FalModel(
+        "flux_general", "FLUX General (Inpaint + IP-Adapter + Depth)",
+        frozenset({CAP_TEXT2IMG, CAP_IMG2IMG, CAP_INPAINT,
+                   CAP_REFERENCE_IMAGES, CAP_DEPTH_CONTROL}),
+        _flux_general_build,
+    ),
+]
+_FAL_BY_ID = {m.id: m for m in _FAL_MODELS}
+
+
+@register_provider
+class FalProvider(Provider):
+    id = "fal"
+    label = "fal.ai"
+
+    @classmethod
+    def capabilities(cls) -> set[str]:
+        # Union across models so the Generate node never blocks an input that
+        # some model needs; per-model routing handles what each actually uses.
+        caps: set[str] = set()
+        for m in _FAL_MODELS:
+            caps |= m.caps
+        return caps
+
+    @classmethod
+    def models(cls) -> list[tuple]:
+        return [(m.id, m.label, "") for m in _FAL_MODELS]
 
     @classmethod
     def preference_fields(cls) -> list[PreferenceField]:
@@ -172,7 +367,35 @@ class _FalBase(Provider):
                 ),
                 kind="password",
             ),
+            PreferenceField(
+                name="default_model",
+                label="Default Model",
+                description="Model used when the Generate node doesn't override it",
+                kind="enum",
+                default=_FAL_MODELS[0].id,
+                items=[(m.id, m.label, "") for m in _FAL_MODELS],
+            ),
         ]
+
+    # ---- dispatch ----------------------------------------------------------
+
+    def _resolve_model(self, request: GenerateRequest) -> _FalModel:
+        mid = (request.__dict__.get("_model_override") or "").strip()
+        if not mid:
+            mid = self.settings.get("default_model") or _FAL_MODELS[0].id
+        spec = _FAL_BY_ID.get(mid)
+        if spec is None:
+            raise ProviderError(
+                f"Unknown fal model '{mid}'. Available: {sorted(_FAL_BY_ID)}"
+            )
+        return spec
+
+    def generate(self, request: GenerateRequest) -> GenerateResult:
+        spec = self._resolve_model(request)
+        endpoint, body = spec.build(request)
+        return self._run(endpoint, body)
+
+    # ---- queue protocol ----------------------------------------------------
 
     def _run(self, model: str, body: dict, *, timeout: int = 660) -> GenerateResult:
         # Strip whitespace defensively — pastes often include a trailing
@@ -206,204 +429,6 @@ class _FalBase(Provider):
             timeout=timeout,
         )
         return GenerateResult(image_bytes=result["image_bytes"], seed=result.get("seed", 0))
-
-
-# ---------------------------------------------------------------------------
-# FLUX
-# ---------------------------------------------------------------------------
-
-@register_provider
-class FalFluxProvider(_FalBase):
-    id = "fal_flux"
-    label = "fal · FLUX"
-
-    @classmethod
-    def capabilities(cls) -> set[str]:
-        return {CAP_TEXT2IMG, CAP_IMG2IMG, CAP_INPAINT}
-
-    def text2img(self, request: GenerateRequest) -> GenerateResult:
-        body = {
-            "prompt": request.prompt,
-            "image_size": {"width": request.width, "height": request.height},
-            "num_images": 1,
-            "output_format": "png",
-        }
-        if request.seed is not None:
-            body["seed"] = request.seed
-        return self._run("fal-ai/flux/schnell", body)
-
-    def img2img(self, request: GenerateRequest) -> GenerateResult:
-        body = {
-            "prompt": request.prompt,
-            "image_url": _to_data_uri(request.init_image),
-            "strength": request.strength,
-            "num_images": 1,
-            "output_format": "png",
-        }
-        if request.seed is not None:
-            body["seed"] = request.seed
-        return self._run("fal-ai/flux/dev/image-to-image", body)
-
-    def inpaint(self, request: GenerateRequest) -> GenerateResult:
-        body = {
-            "prompt": request.prompt,
-            "image_url": _to_data_uri(request.init_image),
-            "mask_url": _to_data_uri(request.mask_image),
-            "num_images": 1,
-            "output_format": "png",
-        }
-        if request.seed is not None:
-            body["seed"] = request.seed
-        return self._run("fal-ai/flux-pro/v1/fill", body)
-
-
-# ---------------------------------------------------------------------------
-# FLUX General — inpaint + IP-Adapter (style references)
-# ---------------------------------------------------------------------------
-
-# Default IP-Adapter checkpoints used when `reference_images` are supplied.
-# These ship with fal's flux-general endpoint and don't require extra config.
-_FLUX_IP_ADAPTER_PATH = "XLabs-AI/flux-ip-adapter"
-# Without `weight_name`, fal's loader can't pick a file out of the repo and
-# 422s with "Failed to download ip-adapter weights: 'NoneType' object has no
-# attribute 'split'" — it's literally splitting a None URL.
-_FLUX_IP_ADAPTER_WEIGHT = "ip_adapter.safetensors"
-_FLUX_IP_ADAPTER_ENCODER = "openai/clip-vit-large-patch14"
-
-# Depth ControlNet checkpoint used when `depth_image` is supplied. Shakker-Labs'
-# FLUX.1-dev depth ControlNet is the de-facto choice — it ships with fal and
-# expects depth-anything-v2-style maps (white = near, black = far), which is
-# the convention our `render_depth_map` produces.
-_FLUX_DEPTH_CONTROLNET_PATH = "Shakker-Labs/FLUX.1-dev-ControlNet-Depth"
-
-
-@register_provider
-class FalFluxGeneralProvider(_FalBase):
-    """fal's `flux-general` endpoint — the multi-modal FLUX pipeline.
-
-    Accepts init image, mask, and a list of IP-Adapter references for style.
-    This is the one provider that gives you both the inpaint pixel-preservation
-    contract (so screen-space projection lines up) AND multi-image style
-    references in a single call.
-    """
-
-    id = "fal_flux_general"
-    label = "fal · FLUX General (Inpaint + IP-Adapter)"
-
-    @classmethod
-    def capabilities(cls) -> set[str]:
-        return {CAP_TEXT2IMG, CAP_IMG2IMG, CAP_INPAINT,
-                CAP_REFERENCE_IMAGES, CAP_DEPTH_CONTROL}
-
-    def generate(self, request: GenerateRequest) -> GenerateResult:
-        # All capabilities map to the same endpoint — it's the fields on the
-        # body that change. Override `generate()` instead of routing through
-        # text2img/img2img/inpaint because the dispatch in api.py would split
-        # apart cases (e.g. inpaint + references) that this endpoint handles
-        # in a single call.
-        body = {
-            "prompt": request.prompt,
-            "num_images": 1,
-            "output_format": "png",
-            "image_size": {"width": request.width, "height": request.height},
-        }
-        if request.seed is not None:
-            body["seed"] = request.seed
-        if request.negative_prompt:
-            body["negative_prompt"] = request.negative_prompt
-
-        if request.init_image is not None:
-            body["image_url"] = _to_data_uri(request.init_image)
-            body["strength"] = request.strength
-        if request.mask_image is not None:
-            body["mask_url"] = _to_data_uri(request.mask_image)
-
-        if request.reference_images:
-            # Spread weight evenly across references and cap at 0.6 per ref.
-            # Higher scales (≥0.8) overpower the depth ControlNet and FLUX
-            # starts duplicating reference features — e.g. two heads/poms on
-            # a single mesh. 0.5–0.6 is the sweet spot when depth is also on.
-            per_ref = min(0.6, 1.0 / len(request.reference_images))
-            body["ip_adapters"] = [{
-                "path": _FLUX_IP_ADAPTER_PATH,
-                "weight_name": _FLUX_IP_ADAPTER_WEIGHT,
-                "image_encoder_path": _FLUX_IP_ADAPTER_ENCODER,
-                "image_url": _to_data_uri(ref),
-                "scale": per_ref,
-            } for ref in request.reference_images]
-
-        if request.depth_image is not None:
-            # Depth ControlNet — this is what makes the generated content
-            # actually wrap the mesh's 3D structure instead of being a flat
-            # image inside the silhouette. Apply from the start of denoising
-            # but release before the final steps so high-frequency surface
-            # detail (specified by the prompt) isn't clipped by the depth.
-            body["controlnets"] = [{
-                "path": _FLUX_DEPTH_CONTROLNET_PATH,
-                "control_image_url": _to_data_uri(request.depth_image),
-                "conditioning_scale": request.depth_scale,
-                "start_percentage": 0.0,
-                "end_percentage": 0.8,
-            }]
-
-        return self._run("fal-ai/flux-general", body)
-
-
-# ---------------------------------------------------------------------------
-# Nano Banana 2 (Gemini 3.1 Flash Image)
-# ---------------------------------------------------------------------------
-# Nano Banana 2 is a generational leap over the original Nano Banana (Gemini
-# 2.5 Flash Image): it reasons about the request before rendering. With
-# `thinking_level` enabled it actually follows data-conversion instructions
-# like "produce a tangent-space normal map" instead of just hue-shifting the
-# input. The old `fal-ai/gemini-25-flash-image[/edit]` endpoints ignored such
-# prompts, so we target the nano-banana-2 endpoints here.
-
-# Generation params. `thinking_level` ("minimal"/"high", or None to disable)
-# is the reasoning pass that makes the model obey complex instructions.
-_NANO_BANANA_RESOLUTION = "1K"        # "0.5K" / "1K" / "2K" / "4K"
-_NANO_BANANA_THINKING = "high"        # "minimal" / "high" / None
-_NANO_BANANA_ASPECT = "auto"
-
-
-def _nano_banana_body(prompt: str) -> dict:
-    body = {
-        "prompt": prompt,
-        "num_images": 1,
-        "aspect_ratio": _NANO_BANANA_ASPECT,
-        "output_format": "png",
-        "resolution": _NANO_BANANA_RESOLUTION,
-    }
-    if _NANO_BANANA_THINKING:
-        body["thinking_level"] = _NANO_BANANA_THINKING
-    return body
-
-
-@register_provider
-class FalNanoBananaProvider(_FalBase):
-    id = "fal_nano_banana"
-    label = "fal · Nano Banana 2 (Gemini 3.1 Flash Image)"
-
-    @classmethod
-    def capabilities(cls) -> set[str]:
-        # No CAP_INPAINT: Nano Banana has no mask channel. The addon's
-        # client-side composite handles per-pixel masking instead.
-        return {CAP_TEXT2IMG, CAP_IMG2IMG, CAP_REFERENCE_IMAGES}
-
-    def text2img(self, request: GenerateRequest) -> GenerateResult:
-        body = _nano_banana_body(request.prompt)
-        if request.reference_images:
-            # When refs are present, route through the edit endpoint.
-            body["image_urls"] = [_to_data_uri(b) for b in request.reference_images]
-            return self._run("fal-ai/nano-banana-2/edit", body)
-        return self._run("fal-ai/nano-banana-2", body)
-
-    def img2img(self, request: GenerateRequest) -> GenerateResult:
-        urls = [_to_data_uri(request.init_image)]
-        urls.extend(_to_data_uri(b) for b in request.reference_images)
-        body = _nano_banana_body(request.prompt)
-        body["image_urls"] = urls
-        return self._run("fal-ai/nano-banana-2/edit", body)
 
 
 # ---------- helpers ---------------------------------------------------------

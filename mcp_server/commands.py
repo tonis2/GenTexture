@@ -149,6 +149,7 @@ def cmd_list_providers(params: dict) -> dict:
                 "label": pcls.label or pid,
                 "capabilities": sorted(pcls.capabilities()),
                 "api_key_configured": api_key_present,
+                "models": [mid for mid, _label, _desc in pcls.models()],
             })
         return out
     providers = main_thread.run_on_main(_read)
@@ -188,6 +189,10 @@ def _run_generation(params: dict, default_op: str) -> dict:
     settings, req = main_thread.run_on_main(
         lambda: (_get_settings(provider_id), _build_request(params))
     )
+    # Optional per-call model selection (providers that expose models()).
+    model = (params.get("model") or "").strip()
+    if model:
+        object.__setattr__(req, "_model_override", model)
     inst = get_provider(provider_id, settings)
 
     # Provider call: blocking, runs subprocess HTTP. Serialize per-provider

@@ -172,6 +172,17 @@ class Provider(ABC):
         """
         return []
 
+    @classmethod
+    def models(cls) -> list[tuple]:
+        """Selectable model variants as ``(id, label, description)`` tuples.
+
+        Providers that offer multiple models return them here; the Generate
+        node then shows a Model dropdown populated from this list. An empty
+        list (the default) means the node falls back to a free-text Model
+        field. The chosen id is passed to the provider as ``_model_override``.
+        """
+        return []
+
     # ---- lifecycle ---------------------------------------------------------
 
     def __init__(self, settings: dict | None = None):
