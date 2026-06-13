@@ -5,8 +5,9 @@ Two canonical workflows that would otherwise be tedious to wire by hand:
   - "Viewport Projection": Text -> Generate; Viewport Capture -> Generate's
     Init/Mask/Depth; Generate -> Project Layer; Viewport Capture -> Project
     Layer's Capture handle.
-  - "PBR Material": one Reference Image fans out into three Generate->Output
-    chains, each with its own prompt (albedo / normal / roughness).
+  - "PBR Material": an Albedo Text->Generate->Output chain whose generated
+    image is fed as the reference into the Normal and Depth chains, so all
+    three maps stay coherent with the base color.
 
 Exposed both as buttons in the Node Editor sidebar and as a submenu under
 Shift+A so users don't have to remember the wiring.
@@ -55,36 +56,51 @@ def build_projection_template(tree, ox, oy):
     return [prompt, cap, gen, proj]
 
 
+def _new_generate(tree, x, y, label=None):
+    n = tree.nodes.new("GenTexNodeGenerate")
+    n.location = (x, y)
+    n.provider = "gemini_direct"
+    n.model_enum = "gemini-3-pro-image-preview"
+    if label:
+        n.label = label
+    return n
+
+
 def build_pbr_template(tree, ox, oy):
-    ref = tree.nodes.new("GenTexNodeReferenceImage")
-    ref.location = (ox, oy)
-    ref.label = "Concept / Source"
+    """The three maps are generated as a chain, each feeding the next as a
+    reference image: Albedo -> Depth -> Normal. Albedo is generated from its
+    prompt alone, Depth takes the albedo result as its reference, and Normal
+    takes the depth result. Each link is Text -> Generate -> Output Image."""
 
     rows = [
-        ("Albedo", "Create albedo map texture, that can be used in game engine as material, take reference from the style of attached image.Texture must be seamless on all axes."),
-        ("Normal",  "Create normal map texture, that can be used in game engine as material, take reference from the attached image. Texture must be seamless on all axes"),
-        ("Depth", "Create depth map texture, that can be used in game engine as material, take reference from the attached image.Texture must be seamless on all axes"),
+        ("Albedo", "Create albedo texture. It needs to work in game engine. it has to be seamless on all axes and unlit."),
+        ("Depth",  "Create depth texture. It needs to work in game engine. it has to be seamless on all axes."),
+        ("Normal", "Create normal texture. It needs to work in game engine. it has to be seamless on all axes."),
     ]
 
-    created = [ref]
+    created = []
+    prev_out = None
     for i, (name, prompt_text) in enumerate(rows):
         row_y = oy - i * 450
 
-        text_n = _new_text(tree, ox + 400, row_y, prompt_text, label=f"{name} prompt")
+        text_n = _new_text(tree, ox, row_y, prompt_text, label=f"{name} prompt")
 
-        gen = tree.nodes.new("GenTexNodeGenerate")
-        gen.location = (ox + 850, row_y)
-        gen.label = f"{name} generate"
+        gen = _new_generate(tree, ox + 450, row_y, label=f"{name} generate")
 
         out = tree.nodes.new("GenTexNodeOutputImage")
-        out.location = (ox + 1300, row_y)
+        out.location = (ox + 900, row_y)
         out.output_name = f"PBR {name}"
 
         _link(tree, text_n, "Text", gen, "Prompt")
-        _link(tree, ref, "Image", gen, "References")
         _link(tree, gen, "Image", out, "Image")
 
+        # Every map after Albedo takes the previous map's result as its
+        # reference image, so the chain stays coherent end to end.
+        if prev_out is not None:
+            _link(tree, prev_out, "Image", gen, "References")
+
         created.extend([text_n, gen, out])
+        prev_out = out
 
     return created
 

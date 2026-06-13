@@ -88,6 +88,10 @@ def _draw(self, context):
     layout.use_property_split = True
     layout.use_property_decorate = False
 
+    box = layout.box()
+    box.label(text="Output", icon='FILE_FOLDER')
+    box.prop(self, "save_folder")
+
     for pid, pcls in iter_providers():
         fields = pcls.preference_fields()
         if not fields:
@@ -124,6 +128,18 @@ def _build_preferences_class():
     # Provider selection is now per-Generate-node (see node_tree/nodes/generate.py),
     # so the addon-prefs no longer needs a global provider enum.
     annotations: dict = {}
+
+    # Global addon setting: where Output Image nodes auto-save their results.
+    # Empty disables auto-saving (images still live as bpy.data.images datablocks).
+    annotations["save_folder"] = bpy.props.StringProperty(
+        name="Save Folder",
+        description=(
+            "Folder where every generated image is automatically saved as a "
+            "PNG, named after the Output Image node. Leave empty to disable"
+        ),
+        subtype='DIR_PATH',
+        default="",
+    )
 
     for pid, pcls in iter_providers():
         for f in pcls.preference_fields():

@@ -106,6 +106,23 @@ def np_to_png_bytes(array: np.ndarray) -> bytes:
     return png
 
 
+def load_image_file(filepath: str) -> np.ndarray:
+    """Load an image file from disk into a numpy RGBA float32 array via Blender.
+
+    Loads the file through Blender (so any format Blender supports works), reads
+    the pixels, then removes the temporary datablock so external references don't
+    pollute bpy.data.images.
+    """
+    path = bpy.path.abspath(filepath)
+    if not os.path.isfile(path):
+        raise RuntimeError(f"reference file not found: {path}")
+    image = bpy.data.images.load(path)
+    try:
+        return bpy_to_np(image)
+    finally:
+        bpy.data.images.remove(image)
+
+
 def load_image_bytes(data: bytes, name: str = "gentex_response") -> np.ndarray:
     """Load image bytes (PNG/JPEG) into a numpy RGBA float32 array via Blender."""
     # Detect format from magic bytes
