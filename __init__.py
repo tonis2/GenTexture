@@ -86,6 +86,34 @@ if _needs_reload:
 
 
 import bpy
+from bpy.app.handlers import persistent
+
+
+@persistent
+def _reset_run_state(_dummy):
+    """Force the pipeline UI back to idle whenever a .blend is loaded.
+
+    `gentex_progress` is stored per-scene in the .blend, so a value left at
+    "running" (e.g. from a crash or a never-reset cancel) would otherwise
+    reload as a phantom "Generating..." with no live task behind it. A
+    generation can never survive a file load, so clearing it here is always
+    correct.
+
+    Wrapped defensively: during addon registration at Blender startup
+    `bpy.data` is restricted and even iterating scenes can raise. This must
+    never abort registration (which would drop the header Run button).
+    """
+    try:
+        scenes = list(bpy.data.scenes)
+    except Exception:
+        return
+    for scene in scenes:
+        try:
+            scene.gentex_progress = 0
+            if (scene.gentex_info or "").startswith(("[", "Running", "Generating")):
+                scene.gentex_info = ""
+        except Exception:
+            pass
 
 
 classes = (
@@ -137,8 +165,21 @@ def register():
     _nt_panels.register_header()
     _nt_templates.register_add_menu()
 
+    # Clear any stuck "Generating..." state from the currently open file and on
+    # every subsequent file load. Done last and guarded so it can never abort
+    # registration (which would drop the header Run button).
+    if _reset_run_state not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_reset_run_state)
+    try:
+        _reset_run_state(None)
+    except Exception:
+        pass
+
 
 def unregister():
+    if _reset_run_state in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_reset_run_state)
+
     _nt_templates.unregister_add_menu()
     _nt_panels.unregister_header()
     _nt_tree.unregister_categories()

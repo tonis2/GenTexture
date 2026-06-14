@@ -106,11 +106,26 @@ def cancel():
     global _active_task
     if _active_task is not None:
         _active_task.cancel()
+    # Kill any in-flight provider subprocess so the cancel takes effect now,
+    # rather than after the current request finishes on its own.
+    try:
+        from ..providers._http import request_cancel
+        request_cancel()
+    except Exception:
+        pass
 
 
 def run(tree, info_setter: Callable[[str], None], on_finish: Callable[[], None]):
     """Kick off sequential execution of the tree. Returns immediately."""
     global _active_task
+
+    # Clear any cancel latch left over from a previous run so this one isn't
+    # killed the instant a worker subprocess starts.
+    try:
+        from ..providers._http import reset_cancel
+        reset_cancel()
+    except Exception:
+        pass
 
     ctx = make_context(bpy.context.window_manager)
     ctx.tree = tree
@@ -170,17 +185,24 @@ def run(tree, info_setter: Callable[[str], None], on_finish: Callable[[], None])
             return None
 
         def on_complete(_result):
+            global _active_task
             if _active_task and _active_task.is_cancelled:
                 info_setter("Cancelled")
+                _active_task = None
                 on_finish()
                 return
             step(i + 1)
 
         def on_error(err):
             global _active_task
-            info_setter(f"Error in {node.name}: {err}")
-            import traceback
-            traceback.print_exc()
+            if _active_task and _active_task.is_cancelled:
+                # Killing the worker subprocess surfaces as an error; report it
+                # as a cancellation rather than a failure.
+                info_setter("Cancelled")
+            else:
+                info_setter(f"Error in {node.name}: {err}")
+                import traceback
+                traceback.print_exc()
             _active_task = None
             on_finish()
 

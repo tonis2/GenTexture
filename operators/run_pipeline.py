@@ -50,8 +50,15 @@ class GENTEX_OT_RunPipeline(bpy.types.Operator):
 class GENTEX_OT_CancelPipeline(bpy.types.Operator):
     bl_idname = "gentex.cancel_pipeline"
     bl_label = "Cancel Pipeline"
-    bl_description = "Cancel the running pipeline after the current node finishes"
+    bl_description = "Cancel the running pipeline and kill the in-flight request"
 
     def execute(self, context):
         executor.cancel()
+        # Always reset the UI state directly. If a task is live, its callback
+        # will also land on "Cancelled"; if the state is orphaned (e.g. a stuck
+        # value loaded from a saved .blend), this is the only thing that clears
+        # it, since there's no callback left to run.
+        scene = context.scene
+        scene.gentex_progress = 0
+        scene.gentex_info = "Cancelled"
         return {'FINISHED'}

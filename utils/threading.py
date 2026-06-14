@@ -80,8 +80,9 @@ def run_async(
             return 0.5
 
         _tag_redraw()
-        if task.is_cancelled:
-            return None
+        # Always dispatch a callback once the worker exits — even when
+        # cancelled — so the caller can reset its UI state. on_complete /
+        # on_error inspect task.is_cancelled and report "Cancelled" themselves.
         if "error" in result_holder:
             on_error(result_holder["error"])
         elif "result" in result_holder:

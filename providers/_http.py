@@ -30,6 +30,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 
 from .api import (
     AuthenticationError,
@@ -37,6 +38,31 @@ from .api import (
     ProviderError,
     RateLimitError,
 )
+
+
+# Registry of in-flight worker subprocesses so a pipeline cancel can kill them
+# immediately, instead of waiting out the (possibly minutes-long) request.
+_active_procs: set[subprocess.Popen] = set()
+_procs_lock = threading.Lock()
+_cancel_requested = False
+
+
+def request_cancel():
+    """Kill any in-flight worker subprocess. Called by the cancel operator."""
+    global _cancel_requested
+    _cancel_requested = True
+    with _procs_lock:
+        for p in list(_active_procs):
+            try:
+                p.kill()
+            except Exception:
+                pass
+
+
+def reset_cancel():
+    """Clear the cancel latch at the start of a fresh run."""
+    global _cancel_requested
+    _cancel_requested = False
 
 
 def run_subprocess(
@@ -59,29 +85,53 @@ def run_subprocess(
     config = {**config, "output_path": out_path}
 
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             [sys.executable, "-c", worker_script],
-            input=json.dumps(config),
-            capture_output=True, text=True,
-            timeout=timeout,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True,
         )
+    except Exception as e:
+        _cleanup(out_path)
+        raise ProviderError(f"Subprocess error: {e}")
+
+    # Register so a UI cancel can kill this mid-request. If a cancel raced in
+    # before we registered, kill right away.
+    with _procs_lock:
+        _active_procs.add(proc)
+    if _cancel_requested:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    try:
+        out, err = proc.communicate(input=json.dumps(config), timeout=timeout)
     except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
         _cleanup(out_path)
         raise ProviderError("Generation timed out")
     except Exception as e:
         _cleanup(out_path)
         raise ProviderError(f"Subprocess error: {e}")
+    finally:
+        with _procs_lock:
+            _active_procs.discard(proc)
+
+    if _cancel_requested:
+        _cleanup(out_path)
+        raise ProviderError("Cancelled")
 
     if proc.returncode != 0:
         _cleanup(out_path)
         raise ProviderError(
-            f"Worker exited with code {proc.returncode}: {proc.stderr[:2000]}"
+            f"Worker exited with code {proc.returncode}: {err[:2000]}"
         )
 
-    stdout = proc.stdout.strip()
+    stdout = out.strip()
     if not stdout:
         _cleanup(out_path)
-        raise ProviderError(f"No output from worker. stderr: {proc.stderr[:2000]}")
+        raise ProviderError(f"No output from worker. stderr: {err[:2000]}")
 
     try:
         result = json.loads(stdout)
